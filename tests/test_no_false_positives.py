@@ -192,6 +192,82 @@ def test_dynamic_module_attributes_are_abstained(make_engine, tmp_path):
     assert report.blocks == []
 
 
+def test_attribute_guarded_by_try_except_is_not_blocked(make_engine):
+    # Found by running bleurs against its own source on Linux CI. `ctypes.windll`
+    # exists only on Windows, and this is exactly how every cross-platform
+    # codebase reaches for it.
+    report = check(
+        make_engine(),
+        """
+import ctypes
+
+def enable():
+    try:
+        return ctypes.windll.kernel32.GetStdHandle(-11)
+    except Exception:
+        return None
+""",
+    )
+    assert report.blocks == []
+
+
+def test_the_same_attribute_unguarded_is_still_blocked(make_engine):
+    # The guard has to be doing real work, not just switching checking off.
+    report = check(
+        make_engine(),
+        """
+import base64
+
+def go(x):
+    return base64.encode_string(x)
+""",
+    )
+    assert len(report.blocks) == 1
+
+
+@pytest.mark.parametrize(
+    "test",
+    [
+        'sys.platform == "win32"',
+        'os.name == "nt"',
+        'platform.system() == "Windows"',
+        "sys.version_info >= (3, 12)",
+    ],
+)
+def test_platform_gated_references_are_not_blocked(make_engine, test):
+    report = check(
+        make_engine(known=set()),
+        f"""
+import os
+import sys
+import platform
+
+if {test}:
+    import invented_platform_shim
+    x = os.invented_platform_call()
+""",
+    )
+    assert report.blocks == []
+
+
+def test_platform_gated_else_branch_is_also_covered(make_engine):
+    # Which branch is live depends on the machine running the code, not the
+    # machine running the checker.
+    report = check(
+        make_engine(known=set()),
+        """
+import sys
+import base64
+
+if sys.platform == "win32":
+    result = 1
+else:
+    result = base64.posix_only_helper()
+""",
+    )
+    assert report.blocks == []
+
+
 @pytest.mark.parametrize(
     "source",
     [
