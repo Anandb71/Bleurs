@@ -19,15 +19,29 @@ user's trust, permanently.
 from __future__ import annotations
 
 import ast
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..refs import AbstainReason, Reference, RefKind
 from .result import AnalysisResult
 
-#: Exception types that, when caught around an import, mean "optional dependency".
-_OPTIONAL_GUARDS = frozenset(
-    {"ImportError", "ModuleNotFoundError", "Exception", "BaseException"}
+#: Caught around an import, these mean "this dependency is optional".
+_IMPORT_GUARDS = frozenset(
+    {"ImportError", "ModuleNotFoundError", "Exception", "BaseException", "OSError"}
 )
+
+#: Caught around an attribute access, these mean "this may not be here".
+_ATTRIBUTE_GUARDS = frozenset(
+    {"AttributeError", "Exception", "BaseException", "OSError", "NameError"}
+)
+
+#: Names that make an `if` test a statement about the platform or interpreter
+#: version, keyed by the root they hang off.
+_PLATFORM_ATTRS = {
+    "sys": {"platform", "version_info", "maxsize", "implementation", "winver"},
+    "os": {"name", "uname", "sep"},
+    "platform": {"system", "machine", "processor", "python_version", "release"},
+}
 
 
 class PythonAnalyzer:
@@ -45,14 +59,14 @@ class PythonAnalyzer:
             result.parse_error = f"line {exc.lineno}: {exc.msg}"
             return result
 
-        optional_imports = _optional_import_nodes(tree)
+        guards = _guarded_nodes(tree)
         bindings, shadowed, star = _collect_bindings(tree)
 
         if star:
             result.abstentions.add(AbstainReason.STAR_IMPORT)
 
-        self._collect_imports(tree, source, optional_imports, result)
-        self._collect_attributes(tree, source, bindings, shadowed, result)
+        self._collect_imports(tree, source, guards, result)
+        self._collect_attributes(tree, source, bindings, shadowed, guards, result)
         return result
 
     # -- imports ---------------------------------------------------------
@@ -61,11 +75,13 @@ class PythonAnalyzer:
         self,
         tree: ast.AST,
         source: str,
-        optional_imports: set[int],
+        guards: Guards,
         result: AnalysisResult,
     ) -> None:
         for node in ast.walk(tree):
-            optional = id(node) in optional_imports
+            optional = id(node) in guards.imports
+            if optional:
+                result.abstentions.add(guards.reason(node))
 
             if isinstance(node, ast.Import):
                 for alias in node.names:
@@ -76,7 +92,7 @@ class PythonAnalyzer:
                             line=node.lineno,
                             col=node.col_offset,
                             source_text=f"import {alias.name}",
-                            optional=optional,
+                            guarded=optional,
                         )
                     )
 
@@ -101,7 +117,7 @@ class PythonAnalyzer:
                                 line=node.lineno,
                                 col=node.col_offset,
                                 source_text=f"from {node.module} import *",
-                                optional=optional,
+                                guarded=optional,
                             )
                         )
                         continue
@@ -113,7 +129,7 @@ class PythonAnalyzer:
                             line=node.lineno,
                             col=node.col_offset,
                             source_text=f"from {node.module} import {alias.name}",
-                            optional=optional,
+                            guarded=optional,
                         )
                     )
 
@@ -149,6 +165,7 @@ class PythonAnalyzer:
         source: str,
         bindings: dict[str, str],
         shadowed: set[str],
+        guards: Guards,
         result: AnalysisResult,
     ) -> None:
         # An attribute chain `a.b.c` is three nested nodes. Only the outermost
@@ -175,6 +192,10 @@ class PythonAnalyzer:
                 result.abstentions.add(AbstainReason.SHADOWED)
                 continue
 
+            guarded = id(node) in guards.attributes
+            if guarded:
+                result.abstentions.add(guards.reason(node))
+
             module = bindings[root]
             result.references.append(
                 Reference(
@@ -184,6 +205,7 @@ class PythonAnalyzer:
                     line=node.lineno,
                     col=node.col_offset,
                     source_text=".".join((root, *attrs)),
+                    guarded=guarded,
                 )
             )
 
@@ -238,40 +260,107 @@ def _dynamic_import_reference(node: ast.Call, optional: bool) -> Reference | Non
         line=node.lineno,
         col=node.col_offset,
         source_text=f'{target}("{name}")',
-        optional=optional,
+        guarded=optional,
     )
 
 
-def _optional_import_nodes(tree: ast.AST) -> set[int]:
-    """Ids of import nodes guarded by `try: ... except ImportError:`.
+@dataclass
+class Guards:
+    """Nodes the author has already said might not resolve."""
 
-    A guarded import is a deliberate statement that the dependency may be
-    absent. Flagging those as missing would make the tool unusable in every
-    real codebase, all of which do this.
+    imports: set[int] = field(default_factory=set)
+    attributes: set[int] = field(default_factory=set)
+    reasons: dict[int, AbstainReason] = field(default_factory=dict)
+
+    def mark(self, node: ast.AST, reason: AbstainReason, *, kind: str) -> None:
+        target = self.imports if kind == "import" else self.attributes
+        target.add(id(node))
+        self.reasons.setdefault(id(node), reason)
+
+    def reason(self, node: ast.AST) -> AbstainReason:
+        return self.reasons.get(id(node), AbstainReason.GUARDED)
+
+
+def _guarded_nodes(tree: ast.AST) -> Guards:
+    """Find references the source itself admits may not resolve.
+
+    Two forms, and both are everywhere in real code:
+
+        try:                         if sys.platform == "win32":
+            import ujson                 import msvcrt
+        except ImportError:              msvcrt.getch()
+            ujson = None
+
+    In each case the author has stated in code that the reference may not be
+    there. Reporting it as a hallucination would be telling them something
+    they already knew, about code that is correct. `ctypes.windll` exists on
+    Windows and nowhere else; a checker that cannot express "this is fine"
+    fails on the first cross-platform file it meets.
     """
-    guarded: set[int] = set()
+    guards = Guards()
+
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Try):
-            continue
-        if not any(_handler_catches_import_error(h) for h in node.handlers):
-            continue
-        for stmt in node.body:
-            for child in ast.walk(stmt):
-                if isinstance(child, (ast.Import, ast.ImportFrom, ast.Call)):
-                    guarded.add(id(child))
-    return guarded
+        if isinstance(node, ast.Try):
+            catches_import = any(
+                _handler_catches(h, _IMPORT_GUARDS) for h in node.handlers
+            )
+            catches_attribute = any(
+                _handler_catches(h, _ATTRIBUTE_GUARDS) for h in node.handlers
+            )
+            if not (catches_import or catches_attribute):
+                continue
+            for stmt in node.body:
+                for child in ast.walk(stmt):
+                    if catches_import and isinstance(
+                        child, (ast.Import, ast.ImportFrom, ast.Call)
+                    ):
+                        guards.mark(child, AbstainReason.GUARDED, kind="import")
+                    if catches_attribute and isinstance(child, ast.Attribute):
+                        guards.mark(child, AbstainReason.GUARDED, kind="attribute")
+
+        elif isinstance(node, ast.If) and _is_platform_test(node.test):
+            # Both branches, not just the taken one. Which branch is live
+            # depends on the machine running the code, not the machine
+            # running the checker.
+            for stmt in (*node.body, *node.orelse):
+                for child in ast.walk(stmt):
+                    if isinstance(child, (ast.Import, ast.ImportFrom, ast.Call)):
+                        guards.mark(
+                            child, AbstainReason.PLATFORM_GUARDED, kind="import"
+                        )
+                    elif isinstance(child, ast.Attribute):
+                        guards.mark(
+                            child, AbstainReason.PLATFORM_GUARDED, kind="attribute"
+                        )
+
+    return guards
 
 
-def _handler_catches_import_error(handler: ast.ExceptHandler) -> bool:
-    if handler.type is None:  # bare except
+def _is_platform_test(test: ast.expr) -> bool:
+    """Is this `if` asking about the platform or the interpreter version?"""
+    for node in ast.walk(test):
+        if not isinstance(node, ast.Attribute):
+            continue
+        unwound = _unwind_attribute(node)
+        if unwound is None:
+            continue
+        root, attrs = unwound
+        allowed = _PLATFORM_ATTRS.get(root)
+        if allowed and attrs and attrs[0] in allowed:
+            return True
+    return False
+
+
+def _handler_catches(handler: ast.ExceptHandler, names: frozenset[str]) -> bool:
+    if handler.type is None:  # bare except catches everything
         return True
     candidates = (
         handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
     )
     for node in candidates:
-        if isinstance(node, ast.Name) and node.id in _OPTIONAL_GUARDS:
+        if isinstance(node, ast.Name) and node.id in names:
             return True
-        if isinstance(node, ast.Attribute) and node.attr in _OPTIONAL_GUARDS:
+        if isinstance(node, ast.Attribute) and node.attr in names:
             return True
     return False
 

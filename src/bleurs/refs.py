@@ -59,6 +59,8 @@ class AbstainReason(enum.Enum):
     STAR_IMPORT = "wildcard import makes the namespace unknowable"
     SHADOWED = "name is reassigned in this file"
     OPTIONAL_IMPORT = "import is guarded by try/except"
+    GUARDED = "reference is inside a try/except that handles it failing"
+    PLATFORM_GUARDED = "reference is inside a platform or version test"
     DYNAMIC_MODULE = "module defines __getattr__, so any attribute may be valid"
     NOT_INTROSPECTABLE = "module could not be introspected safely"
     LOCAL_UNRESOLVED = "resolves to project-local code we could not index"
@@ -82,9 +84,11 @@ class Reference:
     #: Source text as written, so error messages quote what the author typed
     #: rather than our normalized reconstruction of it.
     source_text: str = ""
-    #: Set when the import sat inside a try/except ImportError, which is the
-    #: universal Python idiom for "this dependency is optional".
-    optional: bool = False
+    #: Set when the author has explicitly handled this reference failing to
+    #: resolve -- a try/except around it, or a platform or version test
+    #: enclosing it. Either way they have said in code that it may not be
+    #: there, and contradicting them is not our place.
+    guarded: bool = False
     #: Leading-dot count for a relative import. Non-zero means `module` is a
     #: fragment that only means something relative to the importing file, and
     #: the engine must anchor it against the project index before judging it.

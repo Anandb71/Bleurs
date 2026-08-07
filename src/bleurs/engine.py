@@ -162,7 +162,7 @@ class Engine:
             line=ref.line,
             col=ref.col,
             source_text=ref.source_text,
-            optional=ref.optional,
+            guarded=ref.guarded,
         )
 
     # -- probe batching --------------------------------------------------
@@ -192,9 +192,27 @@ class Engine:
     def _judge(
         self, ref: Reference, probes: dict[tuple[str, tuple[str, ...]], Probe]
     ) -> Finding:
-        if ref.kind is RefKind.MODULE:
-            return self._judge_module(ref, probes)
-        return self._judge_member(ref, probes)
+        finding = (
+            self._judge_module(ref, probes)
+            if ref.kind is RefKind.MODULE
+            else self._judge_member(ref, probes)
+        )
+
+        # A guarded reference can still be reported, but never blocked. The
+        # author wrapped it in a try/except or a platform test, which is them
+        # telling us in code that it may not resolve here. `ctypes.windll` is
+        # absent on Linux and that is not a defect.
+        if ref.guarded and finding.verdict is Verdict.BLOCK:
+            return Finding(
+                reference=ref,
+                verdict=Verdict.WARN,
+                confidence=finding.confidence,
+                message=finding.message,
+                suggestion=finding.suggestion,
+                abstained=AbstainReason.GUARDED,
+                resolver=finding.resolver,
+            )
+        return finding
 
     # -- modules ---------------------------------------------------------
 
@@ -276,11 +294,7 @@ class Engine:
 
         # Proven: not installed, not stdlib, not local, not a known alias, and
         # no project of that name has ever been published. This is invented.
-        verdict = (
-            Verdict.BLOCK
-            if self.config.strict_imports and not ref.optional
-            else Verdict.WARN
-        )
+        verdict = Verdict.BLOCK if self.config.strict_imports else Verdict.WARN
         return Finding(
             reference=ref,
             verdict=verdict,
@@ -324,7 +338,7 @@ class Engine:
                 line=ref.line,
                 col=ref.col,
                 source_text=ref.source_text,
-                optional=ref.optional,
+                guarded=ref.guarded,
             )
             return self._judge_module(module_ref, probes)
 
