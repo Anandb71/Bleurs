@@ -1,0 +1,7 @@
+# Normalize to LF in the repository. The test suite compares generated source
+# text, and CI runs on Windows as well as Linux.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.gif binary
