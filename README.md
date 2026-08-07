@@ -118,11 +118,27 @@ the user turns it off, and from that moment it catches nothing, forever. Recall
 is worth spending. Precision is not.
 
 So bleurs stays quiet on: wildcard imports, names rebound anywhere in the file,
-imports guarded by `try/except ImportError`, modules with a PEP 562
-`__getattr__`, attribute chains rooted at anything but a module binding, files
-that fail to parse, packages whose registry lookup failed for network reasons,
-and any project-local module it could not index. Run `--explain` and it will
-tell you which of those applied.
+anything inside a `try/except` that would catch it failing, anything inside a
+platform or version test, modules with a PEP 562 `__getattr__`, attribute
+chains rooted at anything but a module binding, files that fail to parse,
+packages whose registry lookup failed for network reasons, and any
+project-local module it could not index. Run `--explain` and it will tell you
+which of those applied.
+
+That third one has teeth. `ctypes.windll` exists on Windows and nowhere else,
+and this is how every cross-platform codebase reaches for it:
+
+```python
+try:
+    return ctypes.windll.kernel32.GetStdHandle(-11)
+except Exception:
+    return None
+```
+
+On Linux that attribute is genuinely absent, and bleurs can prove it — but the
+author already said in code that it might be. Reporting it would be telling
+them something they knew, about code that is correct. bleurs found this exact
+false positive in its own source, on its own CI, on the first run.
 
 ## How it resolves things
 
