@@ -1,85 +1,55 @@
-<h1 align="center">bleurs</h1>
+<div align="center">
 
-<p align="center">
-  <strong>A deterministic firewall for AI coding agents.</strong><br>
-  Blocks hallucinated imports and APIs before they reach disk.
-</p>
+# bleurs
 
-<p align="center">
-  <a href="https://github.com/Anandb71/Bleurs/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Anandb71/Bleurs/actions/workflows/ci.yml/badge.svg"></a>
-  <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue">
-  <img alt="Dependencies: none" src="https://img.shields.io/badge/dependencies-none-brightgreen">
-  <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-black"></a>
-</p>
+**A deterministic firewall for AI coding agents.**
+
+Your agent invents a package. bleurs refuses the write — before it touches disk.
+
+[![CI](https://github.com/Anandb71/Bleurs/actions/workflows/ci.yml/badge.svg)](https://github.com/Anandb71/Bleurs/actions/workflows/ci.yml)
+![Python 3.10+](https://img.shields.io/badge/python-3.10%20%E2%80%93%203.13-blue)
+![Dependencies: none](https://img.shields.io/badge/dependencies-0-brightgreen)
+![Platforms](https://img.shields.io/badge/linux%20%C2%B7%20macos%20%C2%B7%20windows-tested-lightgrey)
+[![License: MIT](https://img.shields.io/badge/license-MIT-black)](LICENSE)
+
+<img src="docs/demo.svg" alt="bleurs demo: eight hallucinations blocked, thirty references verified" width="100%">
+
+</div>
+
+Look at what is **not** in that output.
+
+`03_clean.py` was checked and produced nothing. It is deliberately full of the
+patterns that make naive checkers fire — a shadowed module name, a guarded
+optional import, dynamic attribute access, a submodule reached through its
+parent binding. Catching invented packages is easy if you are willing to be
+wrong sometimes. That silence is the hard part, and it is the entire product.
 
 ---
 
-Your agent writes `from langchain_vectorstore_utils import build_faiss_index`.
-
-The package does not exist. Nobody has ever published it. The code looks perfect,
-passes review, and fails four minutes later — or worse, succeeds, because
-somebody registered that name on PyPI last week and is now running their code on
-your machine.
-
-bleurs sits between the agent and the filesystem and refuses the write.
-
-```
-$ bleurs demo
-
-  01_invented_packages.py - A RAG pipeline, in the style LLMs actually write them.
-  02_invented_apis.py     - Every module here is real and installed. Every call is not.
-  03_clean.py             - Correct code. The only interesting thing here is silence.
-
-01_invented_packages.py
-  BLOCK 6:0   import langchain_vectorstore_utils     - no package named 'langchain_vectorstore_utils' exists on PyPI
-  BLOCK 7:0   from openai_embeddings_toolkit import  - no package named 'openai_embeddings_toolkit' exists on PyPI
-  BLOCK 14:12 lvu.build_faiss_index                  - no package named 'langchain_vectorstore_utils' exists on PyPI
-  BLOCK 15:4  lvu.persist                            - no package named 'langchain_vectorstore_utils' exists on PyPI
-
-02_invented_apis.py
-  BLOCK 13:11 json.loads_safe                        - json has no attribute 'loads_safe'
-  BLOCK 18:11 datetime.datetime.now_utc              - datetime.datetime has no attribute 'now_utc'
-  BLOCK 23:11 os.path.join_all                       - os.path has no attribute 'join_all'
-  BLOCK 28:11 base64.encode_string                   - base64 has no attribute 'encode_string'
-
-8 hallucinations blocked  30 references verified
-```
-
-Note what is *not* in that output. `03_clean.py` is full of the patterns that
-make naive checkers fire — a shadowed module name, a guarded optional import,
-dynamic attribute access, a submodule that is not an attribute of its parent —
-and bleurs says nothing about it. That silence is the hard part.
-
-## Install
+## Quickstart
 
 ```bash
-uv tool install bleurs
+uvx --from git+https://github.com/Anandb71/Bleurs bleurs demo
 ```
 
-Zero runtime dependencies. It uses the interpreter's own `ast` module and its
-own packaging metadata, so there is nothing to provision, no index to build, and
-no database to run.
+Zero dependencies, nothing to provision, no index to build. It reads your
+interpreter's own `ast` module and its own packaging metadata.
 
-Try it without installing:
+> **PyPI release pending.** Once it lands this is just `uvx bleurs demo`.
 
-```bash
-uvx bleurs demo
-```
-
-## Use it as a Claude Code hook
-
-This is the point. Checking after the fact is a linter; checking *before the
-write* is a firewall.
+**Put it in the edit path** — this is the point. Checking after the fact is a
+linter; checking before the write is a firewall.
 
 ```bash
+uv tool install git+https://github.com/Anandb71/Bleurs
 bleurs install-hook
 ```
 
 That registers a `PreToolUse` hook on `Write`, `Edit`, and `MultiEdit`. From
-then on, when the agent proposes an edit, bleurs reconstructs what the file
+then on, when your agent proposes an edit, bleurs reconstructs what the file
 *would* contain, verifies every external reference in it, and rejects the tool
-call if any of them is provably fictional. The agent gets told exactly what was
-wrong and usually fixes it on the next turn:
+call if any is provably fictional. The agent gets told exactly what was wrong
+and usually fixes it on the next turn:
 
 ```
 Bleurs blocked this edit. These references do not exist:
@@ -91,42 +61,267 @@ Fix the reference or install the dependency, then retry.
 ```
 
 Works with anything that can run a command on a JSON payload — Cursor, Codex,
-your own agent loop. It reads a tool call on stdin and answers with an exit
-code.
+your own agent loop. It reads a tool call on stdin and answers with an exit code.
 
-## Use it in CI
+**Put it in CI:**
 
 ```bash
 bleurs check src --exclude demo
 ```
 
-Exit code 1 if anything was blocked. Add `--format json` for machine output, or
-`--explain` to see what it could *not* verify and why.
+Exit 1 if anything was blocked. `--format json` for machine output, `--explain`
+to see what it could *not* verify and why.
+
+---
+
+## What it catches, honestly compared
+
+|  | invented package | invented API on a real library | invented helper in your own repo | tells you the name was **never published** | works on unwritten files | zero config |
+|---|:--:|:--:|:--:|:--:|:--:|:--:|
+| ruff / pyflakes | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ |
+| mypy / pyright | partial | ✓ | ✓ | ✗ | ✗ | ✗ |
+| pip-audit / safety | ✗ | ✗ | ✗ | only known CVEs | ✗ | ✓ |
+| running the tests | ✓ | ✓ | ✓ | ✗ | ✗ | — |
+| **bleurs** | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+Type checkers are genuinely good at most of this column, and if you already run
+pyright in strict mode you have a lot of it covered. Two things they do not do.
+
+**They cannot tell "not installed" from "never existed."** mypy says
+`Cannot find implementation or library stub for module named 'X'` whether X is a
+package you forgot to install or a name no human has ever published. That
+distinction is the whole security story — one is a missing dependency, the other
+is an open supply-chain hole waiting for someone to register it.
+
+**They run after the file exists.** bleurs checks the proposed content of an
+edit that has not happened yet, which is the only place you can actually stop it.
+
+---
 
 ## The one rule
 
 > **BLOCK requires positive evidence of absence.**
 
 Not "we couldn't find it." Not "that looks wrong." Absence, demonstrated by a
-named resolver that looked inside a container it successfully opened. Everything
-short of that is allowed through, and the reason for abstaining is recorded
-rather than discarded.
+named resolver that looked inside a container it successfully opened.
 
-The asymmetry is deliberate. A missed hallucination costs you one failed test
-run, which you were going to have anyway. A false positive costs you the tool —
-the user turns it off, and from that moment it catches nothing, forever. Recall
-is worth spending. Precision is not.
+```mermaid
+flowchart LR
+    A["reference in the<br/>proposed edit"] --> B["resolve against<br/>five tiers"]
+    B --> C{what happened}
+    C -->|"found it"| D["ALLOW"]
+    C -->|"opened the container,<br/>name was not in it"| E["BLOCK"]
+    C -->|"could not open<br/>the container"| F["ALLOW<br/><i>and record why</i>"]
 
-So bleurs stays quiet on: wildcard imports, names rebound anywhere in the file,
-anything inside a `try/except` that would catch it failing, anything inside a
-platform or version test, modules with a PEP 562 `__getattr__`, attribute
-chains rooted at anything but a module binding, files that fail to parse,
-packages whose registry lookup failed for network reasons, and any
-project-local module it could not index. Run `--explain` and it will tell you
-which of those applied.
+    style D fill:#1a7f37,stroke:#1a7f37,color:#fff
+    style E fill:#b62324,stroke:#b62324,color:#fff
+    style F fill:#7d4e00,stroke:#7d4e00,color:#fff
+```
 
-That third one has teeth. `ctypes.windll` exists on Windows and nowhere else,
-and this is how every cross-platform codebase reaches for it:
+That third branch is the one everyone else collapses into the second, and it is
+why their tools get switched off in week two.
+
+The asymmetry is deliberate. A missed hallucination costs one failed test run
+you were going to have anyway. A false positive costs you the tool — the user
+disables it, and from that moment it catches nothing, forever. **Recall is worth
+spending. Precision is not.**
+
+<details>
+<summary><b>Everything bleurs deliberately stays quiet about</b></summary>
+
+<br>
+
+- wildcard imports (`from x import *`) — the namespace becomes unknowable
+- any name rebound anywhere in the file, in all six forms Python offers
+- anything inside a `try/except` that would catch it failing
+- anything inside a platform or version test (`sys.platform`, `os.name`, `platform.system()`, `sys.version_info`)
+- modules with a PEP 562 `__getattr__` — they synthesize attributes on demand, so `dir()` proves nothing
+- attribute chains rooted at anything but a module binding (`f().x`, `d["k"].y`)
+- files that fail to parse — a syntax error is not a hallucination, and Python's own message is better than ours
+- packages whose registry lookup failed for network reasons
+- any project-local module it could not index
+
+`bleurs check --explain` tells you which of these applied to your file. Silently
+skipping a check is the one thing worse than a false positive.
+
+</details>
+
+---
+
+## How it resolves things
+
+Five tiers, cheapest and most certain first. Each answers *present*, *absent*,
+or *I don't know* — and only the middle answer can block.
+
+| Tier | Source of truth | Runs code? | Catches |
+|---|---|:--:|---|
+| **0 · local** | your project's files, parsed | no | helpers the agent invented in your own codebase |
+| **1 · stdlib** | `sys.stdlib_module_names` | no | fake stdlib modules |
+| **2 · env** | installed distribution metadata | no | packages that aren't there |
+| **3 · introspect** | the real library object | **yes**, sandboxed | **fake APIs on real libraries** |
+| **4 · registry** | PyPI, cached on disk | no | invented packages · slopsquatting bait |
+
+Tier 3 is the one nothing else does, and it catches the failure mode that
+survives code review: the import is fine, the library is real, and the method is
+fiction.
+
+It is also the only tier that executes third-party code, because there is no
+other way to ask an object what it contains. That happens in an isolated
+subprocess with a timeout, batched once per check run rather than once per
+reference, and only for packages already installed in your environment — code
+you were about to import anyway. `--no-introspect` turns it off, and bleurs then
+says plainly that it verified no APIs rather than pretending the file is clean.
+
+**Speed:** ~300 ms to check one file end-to-end, ~200 ms of which is Python
+interpreter startup. Registry answers are cached on disk, so the network is hit
+once per package name, ever.
+
+---
+
+## Why this doesn't get fixed by better models
+
+A 2026 study measured package hallucination across five frontier models —
+Claude Sonnet 4.6, Claude Haiku 4.5, GPT-5.4-mini, Gemini 2.5 Pro, DeepSeek
+V3.2 — over 199,845 prompts.
+
+| | |
+|---|---|
+| Hallucination rate | **4.62% – 6.10%** |
+| Spread between best and worst model | 1.48 pts, down from 16.5 in the previous cohort |
+| Models that beat GPT-4 Turbo's older ~3.6% | **none** |
+| Package names invented *identically* by all five | **127** |
+
+Everyone converged. Nobody improved. And those 127 shared inventions are exactly
+what makes the attack economical: an adversary registers the name once and waits
+for five different models to recommend it.
+
+This is not a knowledge problem that scale fixes. It is a grounding problem, and
+grounding is a job for a deterministic checker.
+
+---
+
+## Why not just…
+
+<details>
+<summary><b>…use mypy or pyright?</b></summary>
+
+<br>
+
+Do, they're excellent. They need configuration, they need stubs for untyped
+dependencies, they benefit enormously from annotations, and they run on files
+that exist. bleurs needs none of that and runs on the proposed edit.
+
+More importantly, a type checker cannot distinguish a package you forgot to
+install from one that was never published. That distinction is the difference
+between a missing dependency and a supply-chain vulnerability.
+
+They compose well: pyright for types, bleurs for grounding.
+
+</details>
+
+<details>
+<summary><b>…just run the code?</b></summary>
+
+<br>
+
+You will, and it will catch these. The question is when. An import error surfaces
+at import time; an invented method three branches deep surfaces the first time
+that branch runs, which may be in production. And by then the agent has written
+four more files on top of the mistake.
+
+The value is in the position, not the cleverness — 300 ms before the write beats
+four minutes into a test run beats a week into staging.
+
+</details>
+
+<details>
+<summary><b>…you import arbitrary packages to check them. For a security tool?</b></summary>
+
+<br>
+
+Fair, and it's the sharpest objection to the design.
+
+The mitigation is scope: tier 3 only ever imports packages **already installed in
+your environment** — code that was going to execute the moment you ran your
+program. It does not install anything, does not touch the network, and never
+imports a name it just learned about. Anything not installed is settled by
+metadata and the registry, with no execution at all.
+
+It runs in a subprocess launched with `-I` (isolated mode), with a timeout, so a
+package that hangs, prints, or calls `sys.exit` on import cannot take the checker
+with it. `--no-introspect` disables the tier entirely, and bleurs then reports
+that it verified no APIs instead of implying the file was checked.
+
+</details>
+
+<details>
+<summary><b>…won't this slow my agent down?</b></summary>
+
+<br>
+
+~300 ms per edit, most of it Python startup. Set against an agent turn measured
+in seconds and a wrong-turn recovery measured in minutes, it is not close.
+
+If it matters to you, `--offline --no-introspect` runs in ~200 ms and still
+catches invented packages that aren't installed.
+
+</details>
+
+<details>
+<summary><b>…what happens when it's wrong?</b></summary>
+
+<br>
+
+Two failure directions, treated very differently.
+
+A **missed** hallucination is a normal miss — `--explain` will usually tell you
+it abstained and why. Open an issue if it should have been catchable.
+
+A **false positive** is the highest-priority bug class in this repo and gets
+fixed before features. `tests/test_no_false_positives.py` is written first,
+kept first, and gates every pull request.
+
+</details>
+
+---
+
+## What this is not
+
+- **Not a semantic checker.** It proves a symbol exists. It cannot tell you the
+  right symbol is being used the wrong way. The 2026 AST-validation paper that
+  measured this approach reports 100% precision and 87.6% recall on reference
+  hallucinations, and **0% correction** on contextual mismatches. That boundary
+  is real and bleurs sits firmly on one side of it.
+- **Not a type checker.** Narrower question, no configuration, no annotations.
+- **Not multi-language yet.** Python only. The front-end interface is already
+  factored for tree-sitter backends — see the roadmap.
+
+### The one place a false positive can still get in
+
+If an import name is not installed, not stdlib, not project-local, not in
+[`aliases.py`](src/bleurs/truth/aliases.py), and has no PyPI project of that
+name, bleurs blocks it. The residual risk is a real package whose import name
+differs from its distribution name and which is missing from that table —
+`import cv2` shipping from `opencv-python`, but one nobody has listed yet.
+
+That table is the highest-value contribution anyone can make here, and it is a
+one-line PR. Run `--no-strict-imports` to downgrade every registry-based block
+to a warning if you want the guarantee absolute.
+
+---
+
+## It found this bug in itself
+
+On the very first CI run, the job that checks bleurs against its own source
+failed on Linux:
+
+```
+BLOCK 44:19 ctypes.windll.kernel32 — ctypes has no attribute 'windll'
+```
+
+Correct evidence, wrong conclusion. `report.py` reaches for `ctypes.windll` to
+enable ANSI colours on Windows, inside a `try/except`, and that attribute really
+is absent on Linux. But the author had already said in code that it might be:
 
 ```python
 try:
@@ -135,120 +330,52 @@ except Exception:
     return None
 ```
 
-On Linux that attribute is genuinely absent, and bleurs can prove it — but the
-author already said in code that it might be. Reporting it would be telling
-them something they knew, about code that is correct. bleurs found this exact
-false positive in its own source, on its own CI, on the first run.
+Reporting that would be telling them something they knew, about code that is
+correct. The fix generalized the old try/except-`ImportError` special case into
+a full guarded-reference rule covering exception handlers matched per reference
+kind and platform/version conditionals on both branches. Seven regression tests,
+[three commits](https://github.com/Anandb71/Bleurs/commit/c64bcb7).
 
-## How it resolves things
+This is the class of bug that decides whether a tool like this is usable, and
+the reason the dogfood job exists.
 
-Five tiers, cheapest and most certain first. Each can answer *present*,
-*absent*, or *I don't know* — and only the middle answer can block.
-
-| Tier | Source of truth | Executes code? | Catches |
-|---|---|---|---|
-| 0 · local | your project's files, parsed | no | helpers the agent invented in your own codebase |
-| 1 · stdlib | `sys.stdlib_module_names` | no | fake stdlib modules |
-| 2 · env | installed distribution metadata | no | packages that aren't there |
-| 3 · introspect | the real library object | **yes**, sandboxed | **fake APIs on real libraries** |
-| 4 · registry | PyPI, cached on disk | no | invented packages / slopsquatting bait |
-
-Tier 3 is the one nothing else does, and it is the only way to catch the failure
-mode that survives review: the import is fine, the library is real, and the
-method is fiction.
-
-It is also the tier that runs third-party code, because there is no other way to
-ask an object what it contains. It happens in an isolated subprocess with a
-timeout, once per check run rather than once per reference, and only for
-packages already installed in your environment — code you were going to import
-anyway. `--no-introspect` turns it off; bleurs then still catches invented
-packages and says plainly that it checked no APIs.
-
-## Why this is a real problem
-
-A 2026 study measured package hallucination across five frontier models —
-Claude Sonnet 4.6, Claude Haiku 4.5, GPT-5.4-mini, Gemini 2.5 Pro, DeepSeek
-V3.2 — over 199,845 prompts. Rates ranged from **4.62% to 6.10%**. The spread
-between best and worst model collapsed from 16.5 points in the previous cohort
-to 1.48, and **not one of them beat GPT-4 Turbo's older ~3.6%**.
-
-Everyone converged. Nobody improved. **127 package names were invented
-identically by all five models** — which is what makes them registrable by an
-attacker, and what makes them checkable by us.
-
-This is not a problem that scaling fixes, because it is not a knowledge problem.
-It is a grounding problem, and grounding is a job for a deterministic checker.
-
-## What this is not
-
-- **Not a semantic checker.** It proves a symbol exists. It cannot tell you that
-  the right symbol is being used the wrong way. The 2026 AST-validation paper
-  that measured this approach reports 100% precision and 87.6% recall on
-  reference hallucinations, and **0% correction** on contextual mismatches. That
-  boundary is real and this tool sits firmly on one side of it.
-- **Not a type checker.** mypy and pyright already do that, better. bleurs
-  answers a narrower question and answers it without configuration, without
-  annotations, and on files that do not exist yet.
-- **Not multi-language yet.** Python only. The front-end interface is already
-  factored for tree-sitter backends; see below.
-
-### The one place a false positive can still get in
-
-If an import name is not installed, is not stdlib, is not project-local, is not
-in [`aliases.py`](src/bleurs/truth/aliases.py), and has no PyPI project of that
-name, bleurs blocks it. The residual risk is a real package whose import name
-differs from its distribution name and which is missing from that table —
-`import cv2` from `opencv-python`, but one we haven't listed.
-
-That table is the highest-value contribution anyone can make to this repo. Run
-`--no-strict-imports` to downgrade every registry-based block to a warning if
-you want the guarantee absolute.
+---
 
 ## Roadmap
 
 - **tree-sitter front-ends** for TypeScript, Go, and Rust behind the existing
-  `Analyzer` interface — npm has the same slopsquatting problem and no
-  equivalent of `importlib.metadata`.
-- **SCIP ingestion** so tier 0 can consume an existing
-  [SCIP](https://scip-code.org/) index instead of walking the filesystem, and
-  inherit real cross-file name resolution.
+  `Analyzer` interface. npm has the same slopsquatting problem with a bigger
+  blast radius. The hard part isn't parsing — it's finding what plays the role
+  of `importlib.metadata` and runtime introspection in each language.
+- **SCIP ingestion** so tier 0 consumes an existing [SCIP](https://scip-code.org/)
+  index instead of walking the filesystem, inheriting real cross-file name
+  resolution rather than reimplementing it badly.
 - **A recall benchmark** against a public corpus of model-generated code, so
-  "87.6%" is a number this repo measures rather than cites.
-- **Retrieval**, eventually: once you can prove what exists, you can start
-  fetching it instead of generating it.
+  "87.6%" becomes a number this repo measures instead of one it cites.
+- **Retrieval.** Once you can prove what exists, you can start fetching it
+  instead of generating it.
 
-## Prior art, and credit where it is owed
+---
+
+## Prior art, and credit where it's owed
 
 bleurs is a small idea standing on a lot of other people's work. If you are
-building in this space, read these before you read my code:
+building in this space, read these before you read my code.
 
-- **[SCIP](https://sourcegraph.com/blog/announcing-scip)** (Sourcegraph) — the
-  code-intelligence index format this should eventually consume rather than
-  reinvent. Also [LSIF](https://lsif.dev/), its predecessor.
-- **[Stack Graphs](https://arxiv.org/pdf/2211.01224)** (GitHub) — incremental
-  name resolution at scale; the right answer to the problem tier 0 solves
-  crudely.
-- **[Glean](https://glean.software/)** (Meta) and **Kythe** (Google) — typed,
-  schema-defined fact databases about source code.
-- **[Coccinelle](https://lwn.net/Articles/315686/)** — semantic patches for C.
-  Twenty years ahead of the current conversation about AST-level edits.
-- **[OpenRewrite](https://docs.openrewrite.org/)** (Moderne) — lossless semantic
-  trees and recipe-based transformation.
-- **[Automated Software Transplantation](https://dl.acm.org/doi/10.1145/2771783.2771796)**
-  (Barr, Harman, Jia, Marginean, Petke — ISSTA 2015) — µSCALPEL moved the H.264
-  codec from x264 into VLC automatically. Required reading for anyone who thinks
-  "just retrieve the code instead of generating it" is a new idea.
-- **[ast-grep](https://ast-grep.github.io/)** and
-  **[tree-sitter](https://tree-sitter.github.io/)** — what the non-Python
-  front-ends will be built on.
-- **[Serena](https://github.com/oraios/serena)** — LSP-backed semantic tooling
-  for agents; solves the retrieval half of this problem well.
-- *Detecting and Correcting Hallucinations in LLM-Generated Code via
-  Deterministic AST Analysis* ([arXiv:2601.19106](https://arxiv.org/abs/2601.19106))
-  — the introspection-based validation approach tier 3 implements, and the
-  source of the precision/recall figures quoted above.
-- *The Range Shrinks, the Threat Remains* ([arXiv:2605.17062](https://arxiv.org/abs/2605.17062))
-  — the 2026 frontier-cohort package hallucination measurements.
+| | |
+|---|---|
+| [**SCIP**](https://sourcegraph.com/blog/announcing-scip) · Sourcegraph | The code-intelligence index format this should consume rather than reinvent. Also [LSIF](https://lsif.dev/), its predecessor. |
+| [**Stack Graphs**](https://arxiv.org/pdf/2211.01224) · GitHub | Incremental name resolution at scale — the right answer to what tier 0 does crudely. |
+| [**Glean**](https://glean.software/) · Meta, and **Kythe** · Google | Typed, schema-defined fact databases about source code. |
+| [**Coccinelle**](https://lwn.net/Articles/315686/) | Semantic patches for C. Twenty years ahead of the current conversation about AST-level edits. |
+| [**OpenRewrite**](https://docs.openrewrite.org/) · Moderne | Lossless semantic trees and recipe-based transformation. |
+| [**Automated Software Transplantation**](https://dl.acm.org/doi/10.1145/2771783.2771796) · Barr, Harman, Jia, Marginean, Petke (ISSTA 2015) | µSCALPEL moved the H.264 codec from x264 into VLC automatically, in 26 hours against 20 days by hand. Required reading for anyone who thinks "retrieve the code instead of generating it" is a new idea. |
+| [**ast-grep**](https://ast-grep.github.io/) and [**tree-sitter**](https://tree-sitter.github.io/) | What the non-Python front-ends will be built on. |
+| [**Serena**](https://github.com/oraios/serena) | LSP-backed semantic tooling for agents; solves the retrieval half of this problem well. |
+| [arXiv:2601.19106](https://arxiv.org/abs/2601.19106) | *Detecting and Correcting Hallucinations in LLM-Generated Code via Deterministic AST Analysis* — the introspection-based validation approach tier 3 implements, and the source of the precision/recall figures above. |
+| [arXiv:2605.17062](https://arxiv.org/abs/2605.17062) | *The Range Shrinks, the Threat Remains* — the 2026 frontier-cohort package hallucination measurements. |
+
+---
 
 ## Contributing
 
@@ -256,6 +383,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). The short version: every pull request
 must keep `tests/test_no_false_positives.py` green. If your change catches more
 hallucinations but makes bleurs blame correct code, the change is wrong.
 
+Good first contributions: a missing pair in [`aliases.py`](src/bleurs/truth/aliases.py),
+a false positive you hit in the wild, or a language front-end.
+
 ## License
 
-MIT © Anand Biju
+MIT © [Anand Biju](https://github.com/Anandb71)
