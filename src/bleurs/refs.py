@@ -26,6 +26,10 @@ class RefKind(enum.Enum):
     MEMBER = "member"
     #: `foo.bar(...)` where `foo` is a module binding -- claims an attribute path.
     ATTRIBUTE = "attribute"
+    #: `x.bar(...)` where `x` is bound to something we can name: an instance of
+    #: a local class, `self` inside a method, or a symbol imported from a
+    #: project module. The claim is about that thing's attribute surface.
+    BOUND_ATTRIBUTE = "bound_attribute"
 
 
 class Confidence(enum.Enum):
@@ -67,6 +71,8 @@ class AbstainReason(enum.Enum):
     RELATIVE_IMPORT = "relative import outside the indexed project root"
     NO_NETWORK = "package is not installed and the registry was unreachable"
     INTROSPECTION_DISABLED = "attribute checking is disabled (--no-introspect)"
+    OPEN_CLASS = "class inherits or generates attributes we cannot enumerate"
+    UNRESOLVED_BINDING = "could not determine what this name refers to"
 
 
 @dataclass(frozen=True)
@@ -93,6 +99,12 @@ class Reference:
     #: fragment that only means something relative to the importing file, and
     #: the engine must anchor it against the project index before judging it.
     level: int = 0
+    #: For BOUND_ATTRIBUTE: the name, as written in this file, that the chain is
+    #: rooted at. Resolved against the current module's namespace.
+    owner: str = ""
+    #: "instance" when the root is a value of that type (`x = Foo()`, `self`);
+    #: "symbol" when the root is the imported thing itself.
+    owner_kind: str = ""
 
     @property
     def dotted(self) -> str:

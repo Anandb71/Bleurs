@@ -5,6 +5,7 @@ Extracts three kinds of claim:
     import numpy                  -> MODULE     "numpy is importable"
     from pandas import DataFrame  -> MEMBER     "DataFrame is a member of pandas"
     np.linalg.norm(x)             -> ATTRIBUTE  "numpy.linalg.norm exists"
+    user.email                    -> BOUND_ATTRIBUTE  "User has an `email`"
 
 The third one is only emitted when the root name is *provably* still bound to
 the module it was imported as. Python lets you rebind anything at any time, so
@@ -67,6 +68,7 @@ class PythonAnalyzer:
 
         self._collect_imports(tree, source, guards, result)
         self._collect_attributes(tree, source, bindings, shadowed, guards, result)
+        self._collect_bound_attributes(tree, bindings, shadowed, guards, result)
         return result
 
     # -- imports ---------------------------------------------------------
@@ -163,7 +165,7 @@ class PythonAnalyzer:
         self,
         tree: ast.AST,
         source: str,
-        bindings: dict[str, str],
+        bindings: Bindings,
         shadowed: set[str],
         guards: Guards,
         result: AnalysisResult,
@@ -186,7 +188,7 @@ class PythonAnalyzer:
                 continue
             root, attrs = unwound
 
-            if root not in bindings:
+            if root not in bindings.modules:
                 continue
             if root in shadowed:
                 result.abstentions.add(AbstainReason.SHADOWED)
@@ -196,7 +198,7 @@ class PythonAnalyzer:
             if guarded:
                 result.abstentions.add(guards.reason(node))
 
-            module = bindings[root]
+            module = bindings.modules[root]
             result.references.append(
                 Reference(
                     kind=RefKind.ATTRIBUTE,
@@ -206,6 +208,113 @@ class PythonAnalyzer:
                     col=node.col_offset,
                     source_text=".".join((root, *attrs)),
                     guarded=guarded,
+                )
+            )
+
+
+    # -- attributes on things that are not modules -----------------------
+
+    def _collect_bound_attributes(
+        self,
+        tree: ast.AST,
+        bindings: Bindings,
+        shadowed: set[str],
+        guards: Guards,
+        result: AnalysisResult,
+    ) -> None:
+        """Claims about objects: `user.emial`, `self.reposiory`, `helper.run()`.
+
+        This is where the hallucinations in a real repository actually live.
+        An agent rarely invents a stdlib function; it invents a method on the
+        class you just showed it.
+
+        Only three roots are trusted, because only three can be pinned to a
+        name without inferring types: a variable assigned exactly once from a
+        direct constructor call, the receiver of a method, and a name imported
+        from somewhere the project index can follow.
+        """
+        roots: dict[str, tuple[str, str]] = {}
+        # Instance bindings are not filtered by `shadowed`: the assignment that
+        # created the binding is itself in that set. They carry their own,
+        # stricter test -- assigned exactly once, and by no other binding form.
+        for name, class_name in bindings.instances.items():
+            roots[name] = (class_name, "instance")
+        for name in bindings.members:
+            if name not in shadowed:
+                roots[name] = (name, "symbol")
+
+        self._emit_bound(tree, roots, guards, result, scope=None)
+
+        # `self` is only meaningful inside the method that declares it, so it
+        # gets its own pass scoped to each class body rather than a file-wide
+        # binding that would leak between classes.
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for child in node.body:
+                if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                params = child.args.posonlyargs + child.args.args
+                if not params:
+                    continue
+                receiver = params[0].arg
+                if receiver in bindings.modules or receiver in bindings.instances:
+                    continue  # ambiguous; the file-wide pass owns this name
+                self._emit_bound(
+                    child,
+                    {receiver: (node.name, "instance")},
+                    guards,
+                    result,
+                    scope=child,
+                )
+
+    def _emit_bound(
+        self,
+        tree: ast.AST,
+        roots: dict[str, tuple[str, str]],
+        guards: Guards,
+        result: AnalysisResult,
+        scope: ast.AST | None,
+    ) -> None:
+        if not roots:
+            return
+
+        inner: set[int] = {
+            id(node.value)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Attribute)
+        }
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Attribute) or id(node) in inner:
+                continue
+            # `self.cache = {}` creates the attribute; it does not claim one.
+            if not isinstance(node.ctx, ast.Load):
+                continue
+
+            unwound = _unwind_attribute(node)
+            if unwound is None:
+                continue
+            root, attrs = unwound
+            if root not in roots:
+                continue
+
+            owner, owner_kind = roots[root]
+            guarded = id(node) in guards.attributes
+            if guarded:
+                result.abstentions.add(guards.reason(node))
+
+            result.references.append(
+                Reference(
+                    kind=RefKind.BOUND_ATTRIBUTE,
+                    module="",
+                    path=tuple(attrs),
+                    line=node.lineno,
+                    col=node.col_offset,
+                    source_text=".".join((root, *attrs)),
+                    guarded=guarded,
+                    owner=owner,
+                    owner_kind=owner_kind,
                 )
             )
 
@@ -365,80 +474,172 @@ def _handler_catches(handler: ast.ExceptHandler, names: frozenset[str]) -> bool:
     return False
 
 
-def _collect_bindings(tree: ast.AST) -> tuple[dict[str, str], set[str], bool]:
-    """Map local names to the modules they were imported as, plus a shadow set.
+@dataclass
+class Bindings:
+    """What each name in the file is bound to, where we can tell."""
+
+    #: `import numpy as np` -> np: numpy. Attribute access resolves against
+    #: the module.
+    modules: dict[str, str] = field(default_factory=dict)
+    #: `user = User()` -> user: "User". Only recorded when the name is assigned
+    #: exactly once in the whole file and the right-hand side is a bare
+    #: constructor call. Anything less and we do not know what it holds.
+    instances: dict[str, str] = field(default_factory=dict)
+    #: Names bound by `from x import y`. The engine resolves what y actually is.
+    members: set[str] = field(default_factory=set)
+
+
+def _collect_bindings(tree: ast.AST) -> tuple[Bindings, set[str], bool]:
+    """Work out what each name refers to, plus a shadow set.
 
     Returns (bindings, shadowed, saw_star_import).
 
-    `bindings` only ever contains names bound to *modules* -- `import numpy as
-    np` gives np -> numpy, and `import os.path` gives os -> os, because that
-    statement binds the top package. `from x import y` binds a member, not a
-    module, so it is deliberately excluded: we cannot follow attribute access
-    through it without knowing what kind of object y is.
+    Module bindings come from `import` statements. `from x import y` binds a
+    member whose kind we cannot know here, so it is recorded as a member and
+    left for the engine to resolve against the project index.
+
+    Instance bindings are the new and delicate part: `user = User()` tells us
+    what `user` is, but only if nothing else in the file ever assigns to that
+    name. A single reassignment anywhere and the binding is discarded, because
+    a wrong type is worse than no type.
     """
-    bindings: dict[str, str] = {}
+    bindings = Bindings()
     shadowed: set[str] = set()
     star = False
+    assignments: dict[str, list[ast.expr]] = {}
+    hard_bound: set[str] = set()
 
     for node in ast.walk(tree):
         # -- module bindings
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.asname:
-                    bindings[alias.asname] = alias.name
+                    bindings.modules[alias.asname] = alias.name
                 else:
                     # `import os.path` binds the name `os`.
                     top = alias.name.split(".")[0]
-                    bindings[top] = top
+                    bindings.modules[top] = top
 
         elif isinstance(node, ast.ImportFrom):
             if any(a.name == "*" for a in node.names):
                 star = True
+            else:
+                for alias in node.names:
+                    bindings.members.add(alias.asname or alias.name)
 
         # -- everything that could rebind a name
         elif isinstance(node, ast.Assign):
             for target in node.targets:
                 shadowed |= _assigned_names(target)
+                # A plain `name = <expr>` is the one binding form we can read a
+                # type out of, so its right-hand side is kept rather than just
+                # counted.
+                if isinstance(target, ast.Name):
+                    assignments.setdefault(target.id, []).append(node.value)
+                else:
+                    hard_bound |= _assigned_names(target)
         elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
-            shadowed |= _assigned_names(node.target)
+            names = _assigned_names(node.target)
+            shadowed |= names
+            if (
+                isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.value is not None
+            ):
+                assignments.setdefault(node.target.id, []).append(node.value)
+            else:
+                hard_bound |= names
         elif isinstance(node, (ast.For, ast.AsyncFor)):
             shadowed |= _assigned_names(node.target)
+            hard_bound |= _assigned_names(node.target)
         elif isinstance(node, (ast.With, ast.AsyncWith)):
             for item in node.items:
                 if item.optional_vars is not None:
                     shadowed |= _assigned_names(item.optional_vars)
+                    hard_bound |= _assigned_names(item.optional_vars)
         elif isinstance(node, ast.ExceptHandler):
             if node.name:
                 shadowed.add(node.name)
+                hard_bound.add(node.name)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             shadowed.add(node.name)
             shadowed |= _parameter_names(node.args)
+            hard_bound.add(node.name)
+            hard_bound |= _parameter_names(node.args)
         elif isinstance(node, ast.Lambda):
             shadowed |= _parameter_names(node.args)
+            hard_bound |= _parameter_names(node.args)
         elif isinstance(node, ast.ClassDef):
             shadowed.add(node.name)
+            hard_bound.add(node.name)
         elif isinstance(node, (ast.Global, ast.Nonlocal)):
             shadowed |= set(node.names)
+            hard_bound |= set(node.names)
         elif isinstance(node, ast.Delete):
             for target in node.targets:
                 shadowed |= _assigned_names(target)
+                hard_bound |= _assigned_names(target)
         elif isinstance(node, comprehension_types):
             for gen in node.generators:
                 shadowed |= _assigned_names(gen.target)
+                hard_bound |= _assigned_names(gen.target)
         elif isinstance(node, ast.NamedExpr):
             shadowed |= _assigned_names(node.target)
+            hard_bound |= _assigned_names(node.target)
         elif isinstance(node, ast.Match):
             # Pattern captures bind names too. Rather than model the whole
             # pattern grammar, take every capture name conservatively.
             for child in ast.walk(node):
                 if isinstance(child, ast.MatchAs) and child.name:
                     shadowed.add(child.name)
+                    hard_bound.add(child.name)
                 elif isinstance(child, ast.MatchStar) and child.name:
                     shadowed.add(child.name)
+                    hard_bound.add(child.name)
                 elif isinstance(child, ast.MatchMapping) and child.rest:
                     shadowed.add(child.rest)
+                    hard_bound.add(child.rest)
+
+    for name, values in assignments.items():
+        if len(values) != 1 or name in hard_bound:
+            continue  # assigned more than once, or bound some other way too
+        constructed = _constructor_name(values[0])
+        if constructed:
+            bindings.instances[name] = constructed
 
     return bindings, shadowed, star
+
+
+def _constructor_name(value: ast.expr) -> str | None:
+    """`Foo()` and `pkg.Foo()` yield a name; anything else yields nothing.
+
+    Deliberately refuses to be clever. `Foo().bar()`, `make_foo()`, a ternary,
+    an await -- all of them might produce a Foo and we would usually be right
+    to guess, but "usually right" is the failure mode this project is built to
+    avoid.
+    """
+    if not isinstance(value, ast.Call):
+        return None
+    name = _dotted_name(value.func)
+    if not name:
+        return None
+    head = name.split(".")[-1]
+    # A constructor call is conventionally capitalised. Requiring it costs a
+    # few real bindings and rejects a great many factory functions, whose
+    # return type we genuinely cannot know.
+    return name if head[:1].isupper() else None
+
+
+def _dotted_name(node: ast.expr) -> str:
+    parts: list[str] = []
+    current: ast.expr = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if not isinstance(current, ast.Name):
+        return ""
+    parts.append(current.id)
+    return ".".join(reversed(parts))
 
 
 comprehension_types = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)

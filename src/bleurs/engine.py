@@ -44,6 +44,7 @@ from .truth import (
     top_level_module_exists,
 )
 from .truth.aliases import NAMESPACE_ROOTS
+from .truth.project import ModuleInfo, ProjectIndex, parse_module
 
 
 @dataclass
@@ -65,9 +66,13 @@ class Config:
 class Engine:
     def __init__(self, config: Config | None = None) -> None:
         self.config = config or Config()
-        self.local = (
-            LocalIndex(self.config.project_root) if self.config.project_root else None
+        self.project = (
+            ProjectIndex(self.config.project_root)
+            if self.config.project_root
+            else None
         )
+        # Share the module index rather than walking the tree twice.
+        self.local: LocalIndex | None = self.project.modules if self.project else None
         self.introspector = Introspector(
             enabled=self.config.introspect,
             timeout=self.config.introspect_timeout,
@@ -101,12 +106,22 @@ class Engine:
                 continue
             references.append(anchored)
 
-        probes = self._gather_probes(references)
-        for reference in references:
-            finding = self._judge(reference, probes)
-            report.findings.append(finding)
-            if finding.abstained is not None:
-                report.abstentions.add(finding.abstained)
+        # The file being checked may not be on disk yet, and even when it is,
+        # the proposed content is what matters. Parse it as the authority on
+        # its own classes and imports, overlaying whatever the index holds.
+        current = self._current_module(source, path)
+        if self.project is not None:
+            self.project.overlay = current
+        try:
+            probes = self._gather_probes(references)
+            for reference in references:
+                finding = self._judge(reference, probes, current)
+                report.findings.append(finding)
+                if finding.abstained is not None:
+                    report.abstentions.add(finding.abstained)
+        finally:
+            if self.project is not None:
+                self.project.overlay = None
 
         self._attach_surfaces(report)
 
@@ -221,6 +236,8 @@ class Engine:
 
         queries: list[tuple[str, tuple[str, ...]]] = []
         for ref in references:
+            if ref.kind is RefKind.BOUND_ATTRIBUTE:
+                continue  # answered from the project index, never by import
             if self._is_local(ref.module):
                 continue
             if ref.kind is RefKind.MODULE:
@@ -235,13 +252,17 @@ class Engine:
     # -- judgement -------------------------------------------------------
 
     def _judge(
-        self, ref: Reference, probes: dict[tuple[str, tuple[str, ...]], Probe]
+        self,
+        ref: Reference,
+        probes: dict[tuple[str, tuple[str, ...]], Probe],
+        current: ModuleInfo | None = None,
     ) -> Finding:
-        finding = (
-            self._judge_module(ref, probes)
-            if ref.kind is RefKind.MODULE
-            else self._judge_member(ref, probes)
-        )
+        if ref.kind is RefKind.MODULE:
+            finding = self._judge_module(ref, probes)
+        elif ref.kind is RefKind.BOUND_ATTRIBUTE:
+            finding = self._judge_bound(ref, current)
+        else:
+            finding = self._judge_member(ref, probes)
 
         # A guarded reference can still be reported, but never blocked. The
         # author wrapped it in a try/except or a platform test, which is them
@@ -348,6 +369,115 @@ class Engine:
             suggestion=self._nearest_installed(top),
             resolver="registry",
         )
+
+    # -- attributes on project objects -----------------------------------
+
+    def _current_module(self, source: str, path: Path) -> ModuleInfo | None:
+        """Parse the proposed content as its own module."""
+        if self.project is None:
+            return None
+        dotted = self.local.dotted_for(path) if self.local else None
+        try:
+            return parse_module(dotted or path.stem, path, source)
+        except (SyntaxError, ValueError):
+            return None
+
+    def _judge_bound(self, ref: Reference, current: ModuleInfo | None) -> Finding:
+        """Judge `user.emial`, `self.reposiory`, `helper.run()`.
+
+        Everything here funnels into one question: can we enumerate the
+        complete set of names this object could answer to? If yes, absence is
+        proof. If no -- an unresolvable base class, a decorator that might have
+        replaced the class, a `__getattr__` -- we abstain, because a name
+        missing from a partial surface is not missing from the object.
+        """
+        if self.project is None or current is None or not ref.path:
+            return _abstain(ref, AbstainReason.UNRESOLVED_BINDING, "no project index")
+
+        symbol = self._resolve_owner(ref.owner, current)
+        if symbol is None:
+            return _abstain(
+                ref,
+                AbstainReason.UNRESOLVED_BINDING,
+                f"could not resolve {ref.owner!r}",
+            )
+
+        wanted = ref.path[0]
+
+        if symbol.kind == "class":
+            if symbol.shape is None:
+                return _abstain(ref, AbstainReason.OPEN_CLASS, "no shape for class")
+            surface = self.project.class_surface(symbol.shape)
+            if surface is None:
+                reason = symbol.shape.reason or "a base class could not be resolved"
+                return _abstain(
+                    ref, AbstainReason.OPEN_CLASS, f"{symbol.name}: {reason}"
+                )
+            if wanted in surface:
+                return _allow(ref, "defined on the class", "project")
+            return Finding(
+                reference=ref,
+                verdict=Verdict.BLOCK,
+                confidence=Confidence.ABSENT,
+                message=f"{symbol.name} has no attribute {wanted!r}",
+                suggestion=_closest(wanted, tuple(sorted(surface))),
+                resolver="project",
+            )
+
+        if symbol.kind == "module":
+            if not self.project.exports_known(symbol.module):
+                return _abstain(
+                    ref, AbstainReason.LOCAL_UNRESOLVED, "module surface is open"
+                )
+            info = self.project.module(symbol.module)
+            if info is None:
+                return _abstain(ref, AbstainReason.LOCAL_UNRESOLVED, "module not read")
+            names = set(info.symbols) | set(info.imports)
+            if wanted in names:
+                return _allow(ref, "defined in that module", "project")
+            return Finding(
+                reference=ref,
+                verdict=Verdict.BLOCK,
+                confidence=Confidence.ABSENT,
+                message=f"{symbol.module} defines no {wanted!r}",
+                suggestion=_closest(wanted, tuple(sorted(names))),
+                resolver="project",
+            )
+
+        # A function or a plain value. Functions carry attributes we cannot
+        # enumerate (functools.wraps, decorators, arbitrary assignment), and a
+        # value's type is exactly what we refused to guess.
+        return _abstain(
+            ref, AbstainReason.UNRESOLVED_BINDING, f"{ref.owner} is a {symbol.kind}"
+        )
+
+    def _resolve_owner(self, owner: str, current: ModuleInfo):
+        """Resolve a name against the file being checked, then the project.
+
+        The current file wins, because its proposed content is newer than
+        anything on disk -- including a class the agent is defining in the very
+        edit we are judging.
+        """
+        assert self.project is not None
+
+        direct = current.symbols.get(owner)
+        if direct is not None:
+            return direct
+
+        target = current.imports.get(owner)
+        if target is None:
+            return None
+
+        origin, original = target
+        if original == "*":
+            if self.project.has_module(origin):
+                from .truth.project import Symbol
+
+                return Symbol(name=owner, module=origin, kind="module")
+            return None
+        if self.project.has_module(origin):
+            return self.project.resolve(origin, original)
+        return None
 
     # -- members and attributes ------------------------------------------
 
