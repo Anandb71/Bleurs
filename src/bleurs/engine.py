@@ -47,6 +47,7 @@ from .truth import (
 )
 from .truth.aliases import NAMESPACE_ROOTS
 from .truth.node import NodeProject
+from .truth.platform_surface import exists_somewhere
 from .truth.registry import NpmRegistry
 from .truth.project import ModuleInfo, ProjectIndex, parse_module
 
@@ -720,13 +721,20 @@ class Engine:
 
         if platform_varying(probe.container):
             # A stdlib container whose surface depends on the operating system.
-            # `signal.SIGQUIT` is real on Unix and absent here; introspecting on
-            # one platform cannot tell that from an invention.
-            return _abstain(
-                ref,
-                AbstainReason.PLATFORM_STDLIB,
-                f"{probe.container} varies by platform",
-            )
+            # Introspecting one machine cannot tell `signal.SIGQUIT`, real on
+            # Unix, from `signal.register_all`, real nowhere -- so consult what
+            # the other platforms actually reported.
+            elsewhere = exists_somewhere(probe.container, probe.missing_at or "")
+            if elsewhere is not False:
+                # True: seen on another platform, so absence here proves
+                # nothing. None: no data, so we are back to not knowing.
+                return _abstain(
+                    ref,
+                    AbstainReason.PLATFORM_STDLIB,
+                    f"{probe.container} varies by platform",
+                )
+            # Absent from Linux, macOS and Windows across every supported
+            # Python. That is not a platform gap, it is an invention.
 
         # Loaded the container, walked it, and the name was not there.
         suggestion = _closest(probe.missing_at or wanted, probe.candidates)
