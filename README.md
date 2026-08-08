@@ -131,9 +131,16 @@ Exposes `surface` (what exists) and `verify` (what doesn't). See
 ### On the command line
 
 ```bash
-bleurs check src --exclude demo        # exit 1 if anything is blocked
-bleurs surface datetime.datetime       # exact API, no file read
-bleurs surface src/app/models.py --stats
+bleurs check src --exclude demo          # exit 1 if anything is blocked
+bleurs surface datetime.datetime         # exact API, no file read
+bleurs context src/app/service.py --stats  # everything needed to edit that file
+```
+
+```
+# working set for hook.py
+# 2803 of 3000 tokens, 14 modules
+...
+~2803 tokens across 14 modules; reading the equivalent files costs ~31693 — 11.3x
 ```
 
 ### In CI
@@ -426,6 +433,7 @@ def f(user): ...            # unbound -> abstains
 | Command | Purpose |
 |---|---|
 | `bleurs check [paths]` | Verify files or directories. Exit 1 if blocked. |
+| `bleurs context <paths>` | Project everything needed to edit those files, budgeted. |
 | `bleurs surface <target>` | Project the API of a module, class, or `.py` file. |
 | `bleurs hook` | Run as a `PreToolUse` hook. Reads a tool call on stdin. |
 | `bleurs mcp` | Run as an MCP server over stdio. |
@@ -444,6 +452,16 @@ def f(user): ...            # unbound -> abstains
 | `--no-introspect` | Never import libraries. Disables API checking. |
 | `--no-strict-imports` | Warn instead of blocking on packages absent from PyPI. |
 
+### `bleurs context`
+
+| Flag | Effect |
+|---|---|
+| `--budget N` | Approximate token budget. Default 6000. |
+| `--depth N` | How far to follow project-local imports. Default 1. |
+| `--root PATH` | Project root. Inferred if omitted. |
+| `--stats` | Compare against the cost of reading the equivalent files. |
+| `--no-introspect` | Project-local modules only. |
+
 ### `bleurs surface`
 
 | Flag | Effect |
@@ -456,6 +474,7 @@ def f(user): ...            # unbound -> abstains
 
 | Tool | Arguments | Returns |
 |---|---|---|
+| `context` | `paths`, `budget?`, `depth?` | The dependency closure of the files you are about to edit |
 | `surface` | `target`, `private?`, `summaries?`, `limit?` | Exact API of a module, class, or project file |
 | `verify` | `code`, `path?` | Blocked references plus the real API of each container |
 
@@ -595,8 +614,11 @@ before you do — and it has.
 - **Not a replacement for conversation compaction.** It removes the dominant
   *cause* of context pressure — file reads — and makes forgetting cheap to
   recover from. Your chat history is still your chat history.
-- **Not a search engine.** `surface` answers "what does this contain" for a
-  target you name; it will not find the target.
+- **Not a search engine.** `context` takes a file you are about to edit, not a
+  sentence describing intent, and `surface` takes a name. Neither will find the
+  starting point for you — that is deliberate, since a similarity ranking is
+  exactly the kind of guess the rest of this tool refuses to make. Pair it with
+  a code-search tool.
 - **The alias table is finite.** If an import name is not installed, not stdlib,
   not project-local, not in [`aliases.py`](src/bleurs/truth/aliases.py), and has
   no PyPI project of that name, bleurs blocks it. The residual risk is a real
@@ -619,9 +641,6 @@ before you do — and it has.
 - **SCIP ingestion** so tier 0 can consume an existing
   [SCIP](https://scip-code.org/) index rather than walking the filesystem,
   inheriting real cross-file name resolution.
-- **Task-scoped working sets.** `surface` answers one target at a time; the next
-  step is projecting the full set of modules a task touches into one budgeted
-  block, recomputed on demand rather than accumulated.
 - **Grounded generation.** Enumerate the permitted reference set and supply it
   to the model *before* it writes, rather than checking afterwards — the
   difference between a spell-checker and a keyboard with only real words on it.
