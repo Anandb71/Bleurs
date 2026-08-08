@@ -12,9 +12,11 @@ Cheapest and most certain first. Every tier can answer "present", "absent", or
 
 from .aliases import IMPORT_TO_DISTRIBUTION, install_name, known_import_name
 from .env import (
+    PLATFORM_VARYING_STDLIB,
     installed_top_levels,
     is_stdlib,
     normalize_project_name,
+    platform_varying,
     stdlib_modules,
     top_level_module_exists,
 )
@@ -27,12 +29,14 @@ __all__ = [
     "Introspector",
     "LocalIndex",
     "Probe",
+    "PLATFORM_VARYING_STDLIB",
     "Registry",
     "install_name",
     "installed_top_levels",
     "is_stdlib",
     "known_import_name",
     "normalize_project_name",
+    "platform_varying",
     "stdlib_modules",
     "top_level_module_exists",
 ]

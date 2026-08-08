@@ -408,6 +408,15 @@ def _guarded_nodes(tree: ast.AST) -> Guards:
     """
     guards = Guards()
 
+    # Annotations are the other type-only position. Under `from __future__
+    # import annotations` they are never evaluated at all, and even without it
+    # a type checker resolves them against stubs rather than the live object.
+    for node in ast.walk(tree):
+        for annotation in _annotation_slots(node):
+            for child in ast.walk(annotation):
+                if isinstance(child, ast.Attribute):
+                    guards.mark(child, AbstainReason.TYPE_ONLY, kind="attribute")
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Try):
             catches_import = any(
@@ -427,6 +436,39 @@ def _guarded_nodes(tree: ast.AST) -> Guards:
                     if catches_attribute and isinstance(child, ast.Attribute):
                         guards.mark(child, AbstainReason.GUARDED, kind="attribute")
 
+        elif isinstance(node, ast.BoolOp) and _contains_hasattr(node):
+            # `if hasattr(socket, "AF_UNIX") and sock.family == socket.AF_UNIX:`
+            # -- the guarded use sits in the same boolean expression as the
+            # guard, not in the body, so the expression itself has to be swept.
+            for child in ast.walk(node):
+                if isinstance(child, ast.Attribute):
+                    guards.mark(child, AbstainReason.EXISTENCE_GUARDED, kind="attribute")
+
+        elif (
+            isinstance(node, (ast.If, ast.IfExp, ast.While))
+            and _contains_hasattr(node.test)
+        ):
+            branches = [node.test, *_branch_bodies(node)]
+            for branch in branches:
+                for child in ast.walk(branch):
+                    if isinstance(child, ast.Attribute):
+                        guards.mark(
+                            child, AbstainReason.EXISTENCE_GUARDED, kind="attribute"
+                        )
+
+        elif isinstance(node, ast.If) and _is_type_checking_test(node.test):
+            # `if TYPE_CHECKING:` never runs. Names in it are resolved by a
+            # type checker against stubs, and stubs routinely declare things
+            # the runtime module does not expose -- `warnings._ActionKind`
+            # being the case that found this. Runtime introspection is simply
+            # the wrong oracle for that position.
+            for stmt in node.body:
+                for child in ast.walk(stmt):
+                    if isinstance(child, (ast.Import, ast.ImportFrom, ast.Call)):
+                        guards.mark(child, AbstainReason.TYPE_ONLY, kind="import")
+                    elif isinstance(child, ast.Attribute):
+                        guards.mark(child, AbstainReason.TYPE_ONLY, kind="attribute")
+
         elif isinstance(node, ast.If) and _is_platform_test(node.test):
             # Both branches, not just the taken one. Which branch is live
             # depends on the machine running the code, not the machine
@@ -443,6 +485,58 @@ def _guarded_nodes(tree: ast.AST) -> Guards:
                         )
 
     return guards
+
+
+def _annotation_slots(node: ast.AST) -> list[ast.expr]:
+    """Every expression on `node` that is a type annotation."""
+    slots: list[ast.expr] = []
+    if isinstance(node, ast.AnnAssign) and node.annotation is not None:
+        slots.append(node.annotation)
+    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if node.returns is not None:
+            slots.append(node.returns)
+        args = node.args
+        for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs):
+            if arg.annotation is not None:
+                slots.append(arg.annotation)
+        for extra in (args.vararg, args.kwarg):
+            if extra is not None and extra.annotation is not None:
+                slots.append(extra.annotation)
+    return slots
+
+
+def _contains_hasattr(node: ast.AST) -> bool:
+    """Does this expression test for an attribute's existence?
+
+    `hasattr(x, "y")` and `getattr(x, "y", default)` are the two idiomatic ways
+    of saying "this may not be here" without a try/except, and both appear
+    constantly in cross-platform code.
+    """
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Call):
+            continue
+        name = child.func.id if isinstance(child.func, ast.Name) else ""
+        if name == "hasattr":
+            return True
+        if name == "getattr" and len(child.args) >= 3:
+            return True
+    return False
+
+
+def _branch_bodies(node: ast.AST) -> list[ast.AST]:
+    if isinstance(node, ast.IfExp):
+        return [node.body, node.orelse]
+    return [*getattr(node, "body", []), *getattr(node, "orelse", [])]
+
+
+def _is_type_checking_test(test: ast.expr) -> bool:
+    """Is this `if TYPE_CHECKING:` in any of its spellings?"""
+    for node in ast.walk(test):
+        if isinstance(node, ast.Name) and node.id == "TYPE_CHECKING":
+            return True
+        if isinstance(node, ast.Attribute) and node.attr == "TYPE_CHECKING":
+            return True
+    return False
 
 
 def _is_platform_test(test: ast.expr) -> bool:
@@ -508,17 +602,18 @@ def _collect_bindings(tree: ast.AST) -> tuple[Bindings, set[str], bool]:
     star = False
     assignments: dict[str, list[ast.expr]] = {}
     hard_bound: set[str] = set()
+    ambiguous: set[str] = set()
 
     for node in ast.walk(tree):
         # -- module bindings
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.asname:
-                    bindings.modules[alias.asname] = alias.name
+                    _bind_module(bindings, ambiguous, alias.asname, alias.name)
                 else:
                     # `import os.path` binds the name `os`.
                     top = alias.name.split(".")[0]
-                    bindings.modules[top] = top
+                    _bind_module(bindings, ambiguous, top, top)
 
         elif isinstance(node, ast.ImportFrom):
             if any(a.name == "*" for a in node.names):
@@ -600,6 +695,9 @@ def _collect_bindings(tree: ast.AST) -> tuple[Bindings, set[str], bool]:
                     shadowed.add(child.rest)
                     hard_bound.add(child.rest)
 
+    for name in ambiguous:
+        bindings.modules.pop(name, None)
+
     for name, values in assignments.items():
         if len(values) != 1 or name in hard_bound:
             continue  # assigned more than once, or bound some other way too
@@ -608,6 +706,29 @@ def _collect_bindings(tree: ast.AST) -> tuple[Bindings, set[str], bool]:
             bindings.instances[name] = constructed
 
     return bindings, shadowed, star
+
+
+def _bind_module(
+    bindings: Bindings, ambiguous: set[str], name: str, module: str
+) -> None:
+    """Bind a name to a module, or mark it ambiguous if it already means another.
+
+    The idiom that found this:
+
+        if sys.version_info >= (3, 11):
+            import tomllib
+        else:
+            import tomli as tomllib
+
+    `tomllib` means a different module on each branch. Taking whichever import
+    the walk happened to reach last produced confident, wrong answers about
+    every attribute on it.
+    """
+    existing = bindings.modules.get(name)
+    if existing is not None and existing != module:
+        ambiguous.add(name)
+        return
+    bindings.modules[name] = module
 
 
 def _constructor_name(value: ast.expr) -> str | None:

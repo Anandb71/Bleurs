@@ -71,6 +71,9 @@ class AbstainReason(enum.Enum):
     RELATIVE_IMPORT = "relative import outside the indexed project root"
     NO_NETWORK = "package is not installed and the registry was unreachable"
     INTROSPECTION_DISABLED = "attribute checking is disabled (--no-introspect)"
+    TYPE_ONLY = "reference is type-only, so stubs rather than runtime decide it"
+    EXISTENCE_GUARDED = "reference is guarded by a hasattr/getattr check"
+    PLATFORM_STDLIB = "stdlib module whose contents differ between platforms"
     OPEN_CLASS = "class inherits or generates attributes we cannot enumerate"
     UNRESOLVED_BINDING = "could not determine what this name refers to"
 

@@ -41,6 +41,8 @@ from .truth import (
     install_name,
     is_stdlib,
     known_import_name,
+    platform_varying,
+    stdlib_modules,
     top_level_module_exists,
 )
 from .truth.aliases import NAMESPACE_ROOTS
@@ -312,6 +314,12 @@ class Engine:
                 )
             if probe.module_ok:
                 return _allow(ref, "installed", "introspect")
+            if _stdlib_platform_gap(probe):
+                return _abstain(
+                    ref,
+                    AbstainReason.PLATFORM_GUARDED,
+                    f"{probe.missing_module} is stdlib but absent on this platform",
+                )
             if probe.proves_module_absent(module):
                 return Finding(
                     reference=ref,
@@ -536,6 +544,12 @@ class Engine:
         if probe.resolved:
             return _allow(ref, "exists", "introspect")
         if not probe.module_ok:
+            if _stdlib_platform_gap(probe):
+                return _abstain(
+                    ref,
+                    AbstainReason.PLATFORM_GUARDED,
+                    f"{probe.missing_module} is stdlib but absent on this platform",
+                )
             if probe.proves_module_absent(module):
                 return Finding(
                     reference=ref,
@@ -548,6 +562,16 @@ class Engine:
                 ref,
                 AbstainReason.NOT_INTROSPECTABLE,
                 f"could not load {module}: {probe.module_error}",
+            )
+
+        if platform_varying(probe.container):
+            # A stdlib container whose surface depends on the operating system.
+            # `signal.SIGQUIT` is real on Unix and absent here; introspecting on
+            # one platform cannot tell that from an invention.
+            return _abstain(
+                ref,
+                AbstainReason.PLATFORM_STDLIB,
+                f"{probe.container} varies by platform",
             )
 
         # Loaded the container, walked it, and the name was not there.
@@ -612,6 +636,21 @@ class Engine:
 
         match = _closest(name, tuple(installed_top_levels()))
         return f"did you mean {match!r}?" if match else None
+
+
+def _stdlib_platform_gap(probe: Probe) -> bool:
+    """Did the import fail because a *stdlib* module is missing here?
+
+    `pwd`, `grp`, `fcntl`, `msvcrt`, `curses` are all standard library modules
+    that only exist on some platforms. Their absence is a fact about this
+    machine, never about the code, and blocking on it made bleurs unusable on
+    any cross-platform file.
+
+    The test is on the module the error actually named, not on the top-level
+    prefix of what we asked for. `import json.encoder_deluxe` fails naming
+    `json.encoder_deluxe`, which is not a stdlib module, and must still block.
+    """
+    return bool(probe.missing_module) and probe.missing_module in stdlib_modules()
 
 
 def _allow(ref: Reference, message: str, resolver: str) -> Finding:

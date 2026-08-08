@@ -268,6 +268,131 @@ else:
     assert report.blocks == []
 
 
+def test_hasattr_guard_in_the_same_expression(make_engine):
+    # Found by the eval, in aiohttp. The guarded use sits in the same boolean
+    # expression as the guard, not in the body below it.
+    report = check(
+        make_engine(),
+        """
+import socket
+
+def go(sock):
+    return hasattr(socket, "AF_UNIX") and sock.family == socket.AF_UNIX
+""",
+    )
+    assert report.blocks == []
+
+
+def test_hasattr_guard_over_a_body(make_engine):
+    report = check(
+        make_engine(),
+        """
+import base64
+
+if hasattr(base64, "b128encode"):
+    value = base64.b128encode(b"x")
+""",
+    )
+    assert report.blocks == []
+
+
+def test_getattr_with_a_default_is_a_guard(make_engine):
+    report = check(
+        make_engine(),
+        """
+import base64
+
+flag = getattr(base64, "b128encode", None)
+""",
+    )
+    assert report.blocks == []
+
+
+def test_platform_varying_stdlib_attributes_abstain(make_engine):
+    # `signal.SIGQUIT` is real on Unix and absent on Windows, and Unix-only
+    # files use it with no guard at all -- correctly, since they never run
+    # anywhere else. Introspecting one platform cannot tell that from an
+    # invention, so it must not block.
+    report = check(
+        make_engine(),
+        """
+import signal
+import socket
+
+def install():
+    signal.signal(signal.SIGQUIT, None)
+    return socket.AF_UNIX
+""",
+    )
+    assert report.blocks == []
+
+
+def test_platform_rule_is_shallow_enough_to_stay_useful(make_engine):
+    # `os` varies by platform; `os.path` does not. Losing the whole tree would
+    # have cost far more recall than the rule is worth.
+    report = check(
+        make_engine(),
+        """
+import os.path
+
+def go(a, b):
+    return os.path.join_all(a, b)
+""",
+    )
+    assert len(report.blocks) == 1
+
+
+def test_type_checking_block_abstains(make_engine):
+    # Stubs routinely declare names the runtime module does not expose;
+    # `warnings._ActionKind` is the case that found this.
+    report = check(
+        make_engine(),
+        """
+from typing import TYPE_CHECKING
+
+import warnings
+
+if TYPE_CHECKING:
+    from warnings import _ActionKind
+
+    Alias = warnings._ActionKind
+""",
+    )
+    assert report.blocks == []
+
+
+def test_annotations_are_resolved_by_stubs_not_runtime(make_engine):
+    report = check(
+        make_engine(),
+        """
+import warnings
+
+def go(kind: warnings._ActionKind) -> warnings._ActionKind:
+    return kind
+""",
+    )
+    assert report.blocks == []
+
+
+def test_a_name_bound_to_two_modules_abstains(make_engine):
+    # The tomllib/tomli idiom. Taking whichever import the walk reached last
+    # produced confident, wrong answers about every attribute on it.
+    report = check(
+        make_engine(known=set()),
+        """
+import sys
+
+if sys.version_info >= (3, 11):
+    import base64 as codec
+else:
+    import json as codec
+
+value = codec.b64encode(b"x")
+""",
+    )
+    assert report.blocks == []
+
+
 @pytest.mark.parametrize(
     "source",
     [

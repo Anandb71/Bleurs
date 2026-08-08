@@ -13,6 +13,52 @@ import importlib.util
 import sys
 
 
+#: Standard library modules whose *contents* differ between operating systems.
+#:
+#: This is the one place where introspection is structurally the wrong oracle.
+#: `signal.SIGQUIT` and `socket.AF_UNIX` are real, and a Unix-only source file
+#: may use them with no guard at all -- correctly, because that file never runs
+#: on Windows. Introspecting on one platform cannot distinguish that from an
+#: invented name, so for these containers absence proves nothing and we abstain.
+#:
+#: The list is deliberately shallow: `os` varies, `os.path` does not, so
+#: `os.path.join_all` is still caught. Entries cost recall and buy correctness,
+#: which is the trade this project makes everywhere. Additions welcome.
+PLATFORM_VARYING_STDLIB: frozenset[str] = frozenset(
+    {
+        "signal",
+        "socket",
+        "os",
+        "sys",
+        "ssl",
+        "select",
+        "selectors",
+        "errno",
+        "mmap",
+        "time",
+        "stat",
+        "ctypes",
+        "subprocess",
+        "resource",
+        "termios",
+        "fcntl",
+        "msvcrt",
+        "winreg",
+        "curses",
+        "multiprocessing",
+        "asyncio",
+        "shutil",
+        "platform",
+        "locale",
+    }
+)
+
+
+def platform_varying(container: str) -> bool:
+    """Is this container a stdlib module whose surface depends on the OS?"""
+    return container in PLATFORM_VARYING_STDLIB
+
+
 @functools.lru_cache(maxsize=1)
 def stdlib_modules() -> frozenset[str]:
     """Top-level stdlib module names for the running interpreter."""
