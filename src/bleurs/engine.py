@@ -46,6 +46,8 @@ from .truth import (
     top_level_module_exists,
 )
 from .truth.aliases import NAMESPACE_ROOTS
+from .truth.node import NodeProject
+from .truth.registry import NpmRegistry
 from .truth.project import ModuleInfo, ProjectIndex, parse_module
 
 
@@ -75,6 +77,13 @@ class Engine:
         )
         # Share the module index rather than walking the tree twice.
         self.local: LocalIndex | None = self.project.modules if self.project else None
+        self.node = (
+            NodeProject(self.config.project_root) if self.config.project_root else None
+        )
+        self.npm = NpmRegistry(enabled=self.config.network)
+        #: The file currently under judgement. Node resolution is relative to
+        #: the importing file, not to the project root.
+        self._current_path: Path = Path(".")
         self.introspector = Introspector(
             enabled=self.config.introspect,
             timeout=self.config.introspect_timeout,
@@ -90,6 +99,7 @@ class Engine:
         string, and checking it *before* the write is the whole point.
         """
         report = Report(path=path)
+        self._current_path = path
         analyzer = for_path(path)
         if analyzer is None:
             return report
@@ -128,7 +138,8 @@ class Engine:
         self._attach_surfaces(report)
 
         self.registry.flush()
-        if self.registry.network_failed:
+        self.npm.flush()
+        if self.registry.network_failed or self.npm.network_failed:
             report.abstentions.add(AbstainReason.NO_NETWORK)
         if not self.config.introspect:
             report.abstentions.add(AbstainReason.INTROSPECTION_DISABLED)
@@ -163,6 +174,8 @@ class Engine:
         wanted: list[tuple[str, tuple[str, ...]]] = []
         for finding in blocks:
             ref = finding.reference
+            if ref.ecosystem != "python":
+                continue
             if ref.kind is RefKind.MODULE or self._is_local(ref.module):
                 continue
             # Project the container, not the missing name: the whole point is
@@ -173,6 +186,8 @@ class Engine:
 
         for finding in blocks:
             ref = finding.reference
+            if ref.ecosystem != "python":
+                continue
             if self._is_local(ref.module) and self.local is not None:
                 path = self.local.path_for(ref.module)
                 if path is not None:
@@ -238,6 +253,8 @@ class Engine:
 
         queries: list[tuple[str, tuple[str, ...]]] = []
         for ref in references:
+            if ref.ecosystem != "python":
+                continue  # nothing here imports JavaScript
             if ref.kind is RefKind.BOUND_ATTRIBUTE:
                 continue  # answered from the project index, never by import
             if self._is_local(ref.module):
@@ -259,7 +276,9 @@ class Engine:
         probes: dict[tuple[str, tuple[str, ...]], Probe],
         current: ModuleInfo | None = None,
     ) -> Finding:
-        if ref.kind is RefKind.MODULE:
+        if ref.ecosystem == "node":
+            finding = self._judge_node(ref)
+        elif ref.kind is RefKind.MODULE:
             finding = self._judge_module(ref, probes)
         elif ref.kind is RefKind.BOUND_ATTRIBUTE:
             finding = self._judge_bound(ref, current)
@@ -376,6 +395,113 @@ class Engine:
             message=f"no package named {top!r} exists on PyPI",
             suggestion=self._nearest_installed(top),
             resolver="registry",
+        )
+
+    # -- node ecosystem ---------------------------------------------------
+
+    def _judge_node(self, ref: Reference) -> Finding:
+        """Resolve a TypeScript or JavaScript module specifier.
+
+        Node's tiers are the filesystem and the registry rather than
+        `importlib.metadata` and live objects, but the discipline is
+        unchanged: only a specifier we can prove names nothing may block.
+        """
+        if self.node is None:
+            return _abstain(ref, AbstainReason.LOCAL_UNRESOLVED, "no project root")
+
+        resolution = self.node.resolve(ref.module, self._current_path)
+
+        if resolution.kind == "unknown":
+            # Almost always a tsconfig path alias, which is indistinguishable
+            # from a bare package by shape alone.
+            return _abstain(ref, AbstainReason.LOCAL_UNRESOLVED, resolution.reason)
+
+        if ref.kind is not RefKind.MODULE and resolution.kind != "file":
+            # Whatever is wrong with the specifier is reported once, against
+            # the import statement itself. Repeating it for every named
+            # binding turns one problem into five lines of noise.
+            return _abstain(
+                ref,
+                AbstainReason.NOT_INTROSPECTABLE,
+                "reported against the module specifier",
+            )
+
+        if resolution.kind == "missing_file":
+            return Finding(
+                reference=ref,
+                verdict=Verdict.BLOCK,
+                confidence=Confidence.ABSENT,
+                message=f"no module at {ref.module!r} relative to this file",
+                resolver="node",
+            )
+
+        if resolution.kind == "declared":
+            return Finding(
+                reference=ref,
+                verdict=Verdict.WARN,
+                confidence=Confidence.PRESENT,
+                message=f"{resolution.package} is in package.json but not installed",
+                suggestion=f"npm install {resolution.package}",
+                resolver="node",
+            )
+
+        if resolution.kind == "absent":
+            exists = self.npm.exists(resolution.package)
+            if exists is None:
+                return _abstain(
+                    ref,
+                    AbstainReason.NO_NETWORK,
+                    f"{resolution.package} is not installed and npm was unreachable",
+                )
+            if exists:
+                return Finding(
+                    reference=ref,
+                    verdict=Verdict.WARN,
+                    confidence=Confidence.PRESENT,
+                    message=f"{resolution.package} exists on npm but is not installed",
+                    suggestion=f"npm install {resolution.package}",
+                    resolver="npm",
+                )
+            verdict = Verdict.BLOCK if self.config.strict_imports else Verdict.WARN
+            return Finding(
+                reference=ref,
+                verdict=verdict,
+                confidence=Confidence.ABSENT,
+                message=f"no package named {resolution.package!r} exists on npm",
+                resolver="npm",
+            )
+
+        # Resolved: builtin, an installed package, or a project file.
+        if ref.kind is RefKind.MODULE:
+            return _allow(ref, resolution.kind, "node")
+
+        # A named import or namespace member. Only project files have a surface
+        # we can enumerate without reading .d.ts, which is tsc's job.
+        if resolution.kind != "file" or resolution.path is None:
+            return _abstain(
+                ref,
+                AbstainReason.NOT_INTROSPECTABLE,
+                "package members need type declarations",
+            )
+
+        from .analyze.typescript import exports_of
+
+        exports = exports_of(resolution.path)
+        if exports is None:
+            return _abstain(
+                ref, AbstainReason.STAR_IMPORT, f"{ref.module} re-exports openly"
+            )
+
+        wanted = ref.path[0] if ref.path else ""
+        if wanted in exports:
+            return _allow(ref, "exported by that module", "node")
+        return Finding(
+            reference=ref,
+            verdict=Verdict.BLOCK,
+            confidence=Confidence.ABSENT,
+            message=f"{ref.module} does not export {wanted!r}",
+            suggestion=_closest(wanted, tuple(sorted(exports))),
+            resolver="node",
         )
 
     # -- attributes on project objects -----------------------------------
