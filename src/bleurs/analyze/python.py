@@ -59,6 +59,14 @@ class PythonAnalyzer:
             # be hallucinating an API -- it is simply broken, loudly, already.
             result.parse_error = f"line {exc.lineno}: {exc.msg}"
             return result
+        except (ValueError, RecursionError, MemoryError) as exc:
+            # `ast.parse` does not only raise SyntaxError. A null byte raises
+            # ValueError, deep nesting raises RecursionError, and neither is a
+            # syntax error we could report usefully. Found by CI on 3.10, where
+            # a source file containing a null byte crashed the analyzer
+            # outright rather than being skipped.
+            result.parse_error = f"{type(exc).__name__}: {exc}"
+            return result
 
         guards = _guarded_nodes(tree)
         bindings, shadowed, star = _collect_bindings(tree)
