@@ -45,10 +45,16 @@ def nothing_installed(monkeypatch):
 def make_engine(tmp_path):
     """Build an engine with a stubbed registry and a real project root."""
 
-    def _make(known: set[str] | None = None, offline: bool = False, **config):
+    def _make(
+        known: set[str] | None = None,
+        offline: bool = False,
+        npm: set[str] | None = None,
+        **config,
+    ):
         config.setdefault("project_root", tmp_path)
         engine = Engine(Config(**config))
         engine.registry = StubRegistry(known, offline)
+        engine.npm = StubRegistry(npm, offline)
         return engine
 
     return _make
