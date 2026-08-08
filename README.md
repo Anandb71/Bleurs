@@ -8,20 +8,21 @@ Blocks the APIs that don't exist. Serves the ones that do. One index, both direc
 
 [![CI](https://github.com/Anandb71/Bleurs/actions/workflows/ci.yml/badge.svg)](https://github.com/Anandb71/Bleurs/actions/workflows/ci.yml)
 ![Python 3.10 – 3.13](https://img.shields.io/badge/python-3.10%20%E2%80%93%203.13-blue)
-![Dependencies: 0](https://img.shields.io/badge/dependencies-0-brightgreen)
+![Languages: Python · TypeScript](https://img.shields.io/badge/checks-python%20%C2%B7%20typescript-8a63d2)
+![Core dependencies: 0](https://img.shields.io/badge/core%20dependencies-0-brightgreen)
 ![Linux · macOS · Windows](https://img.shields.io/badge/linux%20%C2%B7%20macos%20%C2%B7%20windows-tested-lightgrey)
 [![License: MIT](https://img.shields.io/badge/license-MIT-black)](LICENSE)
 
-<img src="docs/demo.svg" alt="bleurs demo: eight hallucinations blocked, thirty references verified" width="100%">
+<img src="docs/demo.svg" alt="bleurs demo: ten hallucinations blocked across Python and TypeScript" width="100%">
 
 </div>
 
-bleurs is a static verifier and API projector for Python that runs **inside the
-edit path** of an AI coding agent. Before a write reaches disk, it resolves
+bleurs is a static verifier and API projector for **Python and TypeScript** that
+runs **inside the edit path** of an AI coding agent. Before a write reaches disk, it resolves
 every external reference in the proposed file against the environment that code
 will actually run in — the standard library, installed distributions, live
-library objects, PyPI, and your own project's symbol table — and rejects the
-edit if any reference is provably fictional. The same index answers the inverse
+library objects, PyPI and npm, `node_modules`, and your own project's symbol
+table — and rejects the edit if any reference is provably fictional. The same index answers the inverse
 question, projecting exact API surfaces so an agent can learn how to call
 something without reading the file that implements it.
 
@@ -40,6 +41,10 @@ The third row is the one that matters. bleurs never reached a wrong verdict on a
 planted hallucination — it either caught it or said out loud that it was not
 judging. See [Evidence](#evidence) for methodology and how to reproduce.
 
+> These figures are measured on **Python** only. The TypeScript front-end has
+> unit coverage but no equivalent corpus eval yet, so nothing here should be
+> read as a measured claim about it.
+
 ## Contents
 
 - [Installation](#installation) · [Quick start](#quick-start) · [What it detects](#what-it-detects)
@@ -52,11 +57,16 @@ judging. See [Evidence](#evidence) for methodology and how to reproduce.
 ## Installation
 
 ```bash
-uv tool install git+https://github.com/Anandb71/Bleurs
+uv tool install git+https://github.com/Anandb71/Bleurs            # Python
+uv tool install "bleurs[typescript] @ git+https://github.com/Anandb71/Bleurs"
 ```
 
-Zero runtime dependencies. Nothing to provision, no index to build, no database.
-It reads the interpreter's own `ast` module and its own packaging metadata.
+The core has zero runtime dependencies: nothing to provision, no index to build,
+no database. It reads the interpreter's own `ast` module and its own packaging
+metadata.
+
+TypeScript support adds tree-sitter, kept as an extra so a Python-only user
+never pays for grammars they will not load.
 
 > **PyPI release pending.** Once published this becomes `uv tool install bleurs`.
 
@@ -141,6 +151,10 @@ bleurs surface src/app/models.py --stats
 | Invented helper in your project | `from app.utils import helper_that_never_existed` | Project symbol table |
 | **Invented method on your own class** | `user.emial`, `self.reposiory` | Project class shapes, with inheritance |
 | Invented member of your own module | `utils.no_such_helper` | Project symbol table |
+| Invented npm package | `import x from "react-hooks-utils-toolkit"` | npm registry |
+| Invented scoped npm package | `import x from "@acme/intl-format-helpers"` | npm registry |
+| Missing relative module | `import { x } from "./nope"` | Node resolution |
+| Invented export from your own module | `import { helperr } from "./utils"` | Project exports |
 
 The bolded row is where hallucinations in a real repository concentrate. An
 agent rarely invents a standard library function; it invents a method on the
@@ -273,6 +287,22 @@ only the middle answer can block.
 | **2 · environment** | installed distribution metadata | no | packages that are not present |
 | **3 · introspection** | the live library object | **yes**, sandboxed | **invented APIs on real libraries** |
 | **4 · registry** | PyPI, cached on disk | no | invented packages, slopsquatting bait |
+
+For TypeScript and JavaScript the same discipline runs over different ground
+truth, because Node has no `importlib.metadata` and no runtime introspection:
+
+| Tier | Source of truth | Catches |
+|---|---|---|
+| **0 · project** | relative resolution with Node's extension and index fallbacks; exports parsed per file | missing modules, invented named exports, invented namespace members |
+| **1 · builtins** | Node's own module list; any `node:` specifier | invented builtins |
+| **2 · installed** | the `node_modules` walk Node itself performs | packages that are not present |
+| **3 · declared** | `package.json` dependency fields | declared but uninstalled — a warning, never a block |
+| **4 · registry** | npm, cached on disk | invented packages, slopsquatting bait |
+
+A tsconfig `paths` alias is indistinguishable from a bare package by shape
+alone, so anything matching an alias prefix — or any bare specifier in a project
+that sets `baseUrl` — abstains rather than risking a false positive on entirely
+ordinary code.
 
 Tiers 0 and 3 also power `surface`. Projecting an API and proving one absent are
 the same operation read in opposite directions, which is why both halves of this
@@ -486,8 +516,13 @@ before you do — and it has.
 
 ## Limitations
 
-- **Python only.** The front-end interface is factored for tree-sitter backends;
-  see [Roadmap](#roadmap).
+- **TypeScript checks packages and project files, not package APIs.** Member
+  access on an npm dependency abstains, because answering it means resolving
+  `.d.ts` files, `exports` maps and declaration merging — tsc's job, and not
+  worth reimplementing badly. Project-local exports and package existence are
+  fully decidable and are checked.
+- **Go and Rust are not supported yet.** The `Analyzer` interface is the
+  extension point; see [Roadmap](#roadmap).
 - **Not a semantic checker.** It proves a symbol exists, not that it is used
   correctly. The published AST-validation work measuring this approach reports
   0% correction on contextual mismatches; that boundary is real.
@@ -509,11 +544,12 @@ before you do — and it has.
 
 ## Roadmap
 
-- **tree-sitter front-ends** for TypeScript, Go, and Rust behind the existing
-  `Analyzer` interface. npm carries the same slopsquatting exposure with a
-  larger blast radius. The difficulty is not parsing but ground truth: each
-  language needs an equivalent of `importlib.metadata` and runtime
-  introspection.
+- **`.d.ts` resolution for TypeScript**, so member access on npm packages is
+  decidable rather than abstained. That means `exports` maps and declaration
+  merging, which argues for driving tsc rather than reimplementing it.
+- **Go and Rust front-ends** behind the same `Analyzer` interface. The
+  difficulty is never parsing; it is ground truth. Each language needs an
+  answer to "what is installed" and "what does this expose".
 - **SCIP ingestion** so tier 0 can consume an existing
   [SCIP](https://scip-code.org/) index rather than walking the filesystem,
   inheriting real cross-file name resolution.

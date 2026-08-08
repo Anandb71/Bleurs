@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 545" width="1100" height="545" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13">
-  <title>bleurs demo — eight hallucinations blocked, thirty references verified</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 690" width="1100" height="690" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13">
+  <title>bleurs demo — ten hallucinations blocked across Python and TypeScript</title>
 
   <style>
     /* Every line defaults to visible. If a renderer strips CSS, the image
@@ -14,7 +14,7 @@
 
     .l { animation: rise .28s ease-out both; }
     #typed  { animation: type .85s steps(14, end) both; }
-    #cursor { animation: blink .7s step-end 6, leave .01s 4.2s both; }
+    #cursor { animation: blink .7s step-end 6, leave .01s 4.8s both; }
 
     .l1  { animation-delay: 1.20s } .l2  { animation-delay: 1.33s }
     .l3  { animation-delay: 1.52s } .l4  { animation-delay: 1.65s }
@@ -23,7 +23,9 @@
     .l9  { animation-delay: 2.39s } .l10 { animation-delay: 2.52s }
     .l11 { animation-delay: 2.74s } .l12 { animation-delay: 2.87s }
     .l13 { animation-delay: 3.00s } .l14 { animation-delay: 3.13s }
-    .l15 { animation-delay: 3.26s } .l16 { animation-delay: 3.55s }
+    .l15 { animation-delay: 3.26s } .l16 { animation-delay: 3.48s }
+    .l17 { animation-delay: 3.61s } .l18 { animation-delay: 3.74s }
+    .l19 { animation-delay: 3.87s } .l20 { animation-delay: 4.16s }
 
     @media (prefers-reduced-motion: reduce) {
       .l, #typed, #cursor { animation: none; opacity: 1; width: auto; }
@@ -34,13 +36,14 @@
     .red  { fill: #ff7b72; font-weight: 700 }
     .cyan { fill: #79c0ff }
     .grn  { fill: #3fb950 }
+    .ylw  { fill: #d29922; font-weight: 700 }
     .wht  { fill: #e6edf3; font-weight: 700 }
   </style>
 
   <clipPath id="typing"><rect id="typed" x="46" y="60" width="92" height="20"/></clipPath>
 
   <!-- window -->
-  <rect width="1100" height="545" rx="10" fill="#0b0e14"/>
+  <rect width="1100" height="690" rx="10" fill="#0b0e14"/>
   <rect width="1100" height="38" rx="10" fill="#151a23"/>
   <rect y="28" width="1100" height="10" fill="#151a23"/>
   <line x1="0" y1="38" x2="1100" y2="38" stroke="#232a36"/>
@@ -66,65 +69,90 @@
   <text x="44" y="211" class="cyan l l5">03_clean.py</text>
   <text x="240" y="211" class="dim l l5">- Correct code. The only interesting thing a checker can do here is shut up.</text>
 
+  <text x="44" y="232" class="cyan l l5">04_invented_npm.ts</text>
+  <text x="240" y="232" class="dim l l5">- The same failure in TypeScript, where the stakes are higher.</text>
+
   <!-- findings: invented packages -->
-  <text x="28" y="247" class="wht l l6">01_invented_packages.py</text>
+  <text x="28" y="268" class="wht l l6">01_invented_packages.py</text>
 
   <g class="l l7">
-    <text x="44" y="270" class="red">BLOCK</text>
-    <text x="98" y="270" class="dim">6:0</text>
-    <text x="152" y="270" class="cyan">import langchain_vectorstore_utils</text>
-    <text x="588" y="270" class="fg">- no package named 'langchain_vectorstore_utils' exists on PyPI</text>
+    <text x="44" y="291" class="red">BLOCK</text>
+    <text x="98" y="291" class="dim">6:0</text>
+    <text x="152" y="291" class="cyan">import langchain_vectorstore_utils</text>
+    <text x="588" y="291" class="fg">- no package named 'langchain_vectorstore_utils' exists on PyPI</text>
   </g>
   <g class="l l8">
-    <text x="44" y="291" class="red">BLOCK</text>
-    <text x="98" y="291" class="dim">7:0</text>
-    <text x="152" y="291" class="cyan">from openai_embeddings_toolkit import ...</text>
-    <text x="588" y="291" class="fg">- no package named 'openai_embeddings_toolkit' exists on PyPI</text>
+    <text x="44" y="312" class="red">BLOCK</text>
+    <text x="98" y="312" class="dim">7:0</text>
+    <text x="152" y="312" class="cyan">from openai_embeddings_toolkit import ...</text>
+    <text x="588" y="312" class="fg">- no package named 'openai_embeddings_toolkit' exists on PyPI</text>
   </g>
   <g class="l l9">
-    <text x="44" y="312" class="red">BLOCK</text>
-    <text x="98" y="312" class="dim">14:12</text>
-    <text x="152" y="312" class="cyan">lvu.build_faiss_index</text>
-    <text x="588" y="312" class="fg">- no package named 'langchain_vectorstore_utils' exists on PyPI</text>
+    <text x="44" y="333" class="red">BLOCK</text>
+    <text x="98" y="333" class="dim">14:12</text>
+    <text x="152" y="333" class="cyan">lvu.build_faiss_index</text>
+    <text x="588" y="333" class="fg">- no package named 'langchain_vectorstore_utils' exists on PyPI</text>
   </g>
   <g class="l l10">
-    <text x="44" y="333" class="red">BLOCK</text>
-    <text x="98" y="333" class="dim">15:4</text>
-    <text x="152" y="333" class="cyan">lvu.persist</text>
-    <text x="588" y="333" class="fg">- no package named 'langchain_vectorstore_utils' exists on PyPI</text>
+    <text x="44" y="354" class="red">BLOCK</text>
+    <text x="98" y="354" class="dim">15:4</text>
+    <text x="152" y="354" class="cyan">lvu.persist</text>
+    <text x="588" y="354" class="fg">- no package named 'langchain_vectorstore_utils' exists on PyPI</text>
   </g>
 
   <!-- findings: invented APIs -->
-  <text x="28" y="369" class="wht l l11">02_invented_apis.py</text>
+  <text x="28" y="390" class="wht l l11">02_invented_apis.py</text>
 
   <g class="l l12">
-    <text x="44" y="392" class="red">BLOCK</text>
-    <text x="98" y="392" class="dim">13:11</text>
-    <text x="152" y="392" class="cyan">json.loads_safe</text>
-    <text x="588" y="392" class="fg">- json has no attribute 'loads_safe'</text>
+    <text x="44" y="413" class="red">BLOCK</text>
+    <text x="98" y="413" class="dim">13:11</text>
+    <text x="152" y="413" class="cyan">json.loads_safe</text>
+    <text x="588" y="413" class="fg">- json has no attribute 'loads_safe'</text>
   </g>
   <g class="l l13">
-    <text x="44" y="413" class="red">BLOCK</text>
-    <text x="98" y="413" class="dim">18:11</text>
-    <text x="152" y="413" class="cyan">datetime.datetime.now_utc</text>
-    <text x="588" y="413" class="fg">- datetime.datetime has no attribute 'now_utc'</text>
+    <text x="44" y="434" class="red">BLOCK</text>
+    <text x="98" y="434" class="dim">18:11</text>
+    <text x="152" y="434" class="cyan">datetime.datetime.now_utc</text>
+    <text x="588" y="434" class="fg">- datetime.datetime has no attribute 'now_utc'</text>
   </g>
   <g class="l l14">
-    <text x="44" y="434" class="red">BLOCK</text>
-    <text x="98" y="434" class="dim">23:11</text>
-    <text x="152" y="434" class="cyan">os.path.join_all</text>
-    <text x="588" y="434" class="fg">- os.path has no attribute 'join_all'</text>
+    <text x="44" y="455" class="red">BLOCK</text>
+    <text x="98" y="455" class="dim">23:11</text>
+    <text x="152" y="455" class="cyan">os.path.join_all</text>
+    <text x="588" y="455" class="fg">- os.path has no attribute 'join_all'</text>
   </g>
   <g class="l l15">
-    <text x="44" y="455" class="red">BLOCK</text>
-    <text x="98" y="455" class="dim">28:11</text>
-    <text x="152" y="455" class="cyan">base64.encode_string</text>
-    <text x="588" y="455" class="fg">- base64 has no attribute 'encode_string'</text>
+    <text x="44" y="476" class="red">BLOCK</text>
+    <text x="98" y="476" class="dim">28:11</text>
+    <text x="152" y="476" class="cyan">base64.encode_string</text>
+    <text x="588" y="476" class="fg">- base64 has no attribute 'encode_string'</text>
+  </g>
+
+  <!-- findings: invented npm packages -->
+  <text x="28" y="512" class="wht l l16">04_invented_npm.ts</text>
+
+  <g class="l l17">
+    <text x="44" y="535" class="red">BLOCK</text>
+    <text x="98" y="535" class="dim">3:0</text>
+    <text x="152" y="535" class="cyan">import "react-hooks-utils-toolkit"</text>
+    <text x="588" y="535" class="fg">- no package by that name exists on npm</text>
+  </g>
+  <g class="l l18">
+    <text x="44" y="556" class="red">BLOCK</text>
+    <text x="98" y="556" class="dim">4:0</text>
+    <text x="152" y="556" class="cyan">import "@acme/intl-format-helpers"</text>
+    <text x="588" y="556" class="fg">- no package by that name exists on npm</text>
+  </g>
+  <g class="l l19">
+    <text x="44" y="577" class="ylw">warn </text>
+    <text x="98" y="577" class="dim">2:0</text>
+    <text x="152" y="577" class="cyan">import "zod"</text>
+    <text x="588" y="577" class="fg">- exists on npm but is not installed</text>
   </g>
 
   <!-- summary -->
-  <g class="l l16">
-    <text x="28" y="500" class="red">8 hallucinations blocked</text>
-    <text x="248" y="500" class="dim">30 references verified</text>
+  <g class="l l20">
+    <text x="28" y="625" class="red">10 hallucinations blocked</text>
+    <text x="248" y="625" class="dim">33 references verified, 1 warning</text>
   </g>
 </svg>
