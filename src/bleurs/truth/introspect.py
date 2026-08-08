@@ -29,9 +29,106 @@ from dataclasses import dataclass
 #: result list on stdout. Deliberately dependency-free and defensive: it is
 #: executing code we did not write.
 _PROBE = r"""
-import json, sys, types, warnings
+import inspect, json, re, sys, types, warnings
 
 warnings.simplefilter("ignore")
+
+MAX_MEMBERS = 500
+MAX_METHODS = 40
+
+# Everything every object inherits. Listing add_note and with_traceback on each
+# exception class costs tokens and tells the reader nothing they did not know.
+NOISE = set(dir(object)) | set(dir(BaseException)) | {"mro"}
+
+# Default values reprd as <object at 0x7f...>. The address changes every run,
+# which would make the output non-deterministic and uncacheable for no benefit.
+ADDRESS = re.compile(r"<[^<>]*? at 0x[0-9a-fA-F]+>")
+
+
+def kind_of(obj):
+    if isinstance(obj, types.ModuleType):
+        return "module"
+    if inspect.isclass(obj):
+        return "class"
+    if inspect.isroutine(obj):
+        return "function"
+    return "value"
+
+
+def signature_of(obj):
+    # Builtins and C extensions often have no introspectable signature. That is
+    # a missing detail, not an error -- the name and kind still carry most of
+    # what a caller needs.
+    try:
+        text = str(inspect.signature(obj))
+    except BaseException:
+        return None
+    return ADDRESS.sub("...", text)
+
+
+def summary_of(obj):
+    # First line of the docstring only. The rest is prose the caller can go
+    # read; the first line is the part that disambiguates two similar names.
+    try:
+        doc = inspect.getdoc(obj)
+    except BaseException:
+        return None
+    if not doc:
+        return None
+    line = doc.strip().split("\n")[0].strip()
+    return line[:140] or None
+
+
+def describe(obj, name, deep):
+    entry = {"name": name, "kind": kind_of(obj)}
+    signature = signature_of(obj)
+    if signature:
+        entry["signature"] = signature
+    summary = summary_of(obj)
+    if summary:
+        entry["summary"] = summary
+
+    if deep and inspect.isclass(obj):
+        methods = []
+        for child in public_names(obj)[:MAX_METHODS]:
+            if child in NOISE:
+                continue
+            try:
+                value = getattr(obj, child)
+            except BaseException:
+                continue
+            if not inspect.isroutine(value) and not isinstance(value, property):
+                continue
+            methods.append(describe(value, child, False))
+        if methods:
+            entry["members"] = methods
+    return entry
+
+
+def surface(module, path):
+    out = {"module": module, "path": path, "ok": False, "error": None, "members": []}
+    try:
+        obj = __import__(module, fromlist=["__name__"])
+        for part in path:
+            obj = getattr(obj, part)
+    except BaseException as exc:
+        out["error"] = "%s: %s" % (type(exc).__name__, exc)
+        return out
+
+    out["ok"] = True
+    out["kind"] = kind_of(obj)
+    out["summary"] = summary_of(obj)
+
+    is_module = out["kind"] == "module"
+    for name in public_names(obj)[:MAX_MEMBERS]:
+        if not is_module and name in NOISE:
+            continue
+        try:
+            value = getattr(obj, name)
+        except BaseException:
+            continue
+        out["members"].append(describe(value, name, is_module))
+    return out
 
 
 def is_dynamic(obj):
@@ -145,6 +242,9 @@ def main():
     results = []
     for q in queries:
         try:
+            if q.get("op") == "surface":
+                results.append(surface(q["module"], q.get("path") or []))
+                continue
             results.append(probe(q["module"], q.get("path") or []))
         except BaseException as exc:
             results.append({
@@ -200,6 +300,50 @@ class Probe:
         )
 
 
+@dataclass(frozen=True)
+class Member:
+    """One public name on a module or class."""
+
+    name: str
+    kind: str
+    signature: str | None = None
+    summary: str | None = None
+    members: tuple["Member", ...] = ()
+
+
+@dataclass(frozen=True)
+class Surface:
+    """The public API of a module or class, as it actually is right now.
+
+    This is the retrieval half of the tool. The same subprocess that proves a
+    name is absent can enumerate the names that are present, which means the
+    index that blocks a hallucination is also the index that prevents the next
+    one -- without the agent reading a single line of the library.
+    """
+
+    module: str
+    path: tuple[str, ...] = ()
+    ok: bool = False
+    error: str | None = None
+    kind: str = "module"
+    summary: str | None = None
+    members: tuple[Member, ...] = ()
+
+    @property
+    def dotted(self) -> str:
+        return ".".join((self.module, *self.path))
+
+
+def _member_from(raw: dict) -> Member:
+    return Member(
+        name=raw.get("name") or "",
+        kind=raw.get("kind") or "value",
+        signature=raw.get("signature"),
+        summary=raw.get("summary"),
+        members=tuple(_member_from(m) for m in raw.get("members") or ()),
+    )
+
+
 class Introspector:
     """Batched, sandboxed attribute resolution."""
 
@@ -233,14 +377,52 @@ class Introspector:
 
         return {q: self._cache[q] for q in queries if q in self._cache}
 
-    def _run(
-        self, queries: list[tuple[str, tuple[str, ...]]]
-    ) -> dict[tuple[str, tuple[str, ...]], Probe]:
-        payload = json.dumps([{"module": m, "path": list(p)} for m, p in queries])
+    def surface(self, module: str, path: tuple[str, ...] = ()) -> Surface:
+        """Enumerate what a module or class actually contains."""
+        return self.surfaces([(module, path)]).get(
+            (module, path),
+            Surface(module=module, path=path, error="probe failed"),
+        )
+
+    def surfaces(
+        self, targets: list[tuple[str, tuple[str, ...]]]
+    ) -> dict[tuple[str, tuple[str, ...]], Surface]:
+        """Project several surfaces in one child process.
+
+        Batched for the same reason probes are: the expensive part is importing
+        the libraries, and doing that once for the whole request beats doing it
+        once per question.
+        """
+        if not self.enabled or not targets:
+            return {}
+
+        unique = list(dict.fromkeys(targets))
+        raw = self._exec(
+            [{"op": "surface", "module": m, "path": list(p)} for m, p in unique]
+        )
+
+        out: dict[tuple[str, tuple[str, ...]], Surface] = {}
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            key = (item.get("module") or "", tuple(item.get("path") or ()))
+            out[key] = Surface(
+                module=key[0],
+                path=key[1],
+                ok=bool(item.get("ok")),
+                error=item.get("error"),
+                kind=item.get("kind") or "module",
+                summary=item.get("summary"),
+                members=tuple(_member_from(m) for m in item.get("members") or ()),
+            )
+        return out
+
+    def _exec(self, queries: list[dict]) -> list[dict]:
+        """Run the probe script once and hand back whatever it managed to say."""
         try:
             proc = subprocess.run(
                 [self.python, "-I", "-c", _PROBE],
-                input=payload,
+                input=json.dumps(queries),
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
@@ -248,13 +430,19 @@ class Introspector:
         except (subprocess.TimeoutExpired, OSError):
             # A hung or unlaunchable probe is a failure to gather evidence.
             # Returning nothing makes the engine abstain, which is right.
-            return {}
+            return []
 
         try:
             results = json.loads(proc.stdout or "[]")
         except json.JSONDecodeError:
             # A package printed to stdout on import and corrupted our channel.
-            return {}
+            return []
+        return results if isinstance(results, list) else []
+
+    def _run(
+        self, queries: list[tuple[str, tuple[str, ...]]]
+    ) -> dict[tuple[str, tuple[str, ...]], Probe]:
+        results = self._exec([{"module": m, "path": list(p)} for m, p in queries])
 
         out: dict[tuple[str, tuple[str, ...]], Probe] = {}
         for item in results:
