@@ -37,14 +37,17 @@ so every resolution tier is active. Reproducible with two commands.
 | **Hallucinations caught** | **287 / 508** (56.5%) | Planted into real files; each planted name verified absent before scoring. |
 | **Judged incorrectly** | **0** | The other 221 were declined with a stated reason, not guessed at. |
 | **Context reduction** | **7.3x** aggregate, 6.6x median | 393 files: 1,323,878 tokens of source → 181,326 tokens of projected surface. |
+| **TypeScript, same method** | **0 / 700 files**, 822 / 827 caught | A `node_modules` of 103 packages. Disputed blocks adjudicated by Node itself. |
 
 The third row is the one that matters. bleurs never reached a wrong verdict on a
 planted hallucination — it either caught it or said out loud that it was not
 judging. See [Evidence](#evidence) for methodology and how to reproduce.
 
-> These figures are measured on **Python** only. The TypeScript front-end has
-> unit coverage but no equivalent corpus eval yet, so nothing here should be
-> read as a measured claim about it.
+TypeScript scores higher on recall (99.4% against 56.5%) for an unglamorous
+reason: **it claims less.** Node's module resolution is a filesystem walk with
+deterministic fallbacks, while Python's surface is dynamic. The TypeScript
+front-end also does not implement class shapes or instance attributes at all —
+and every single bug the Python sweep uncovered lived in exactly that tier.
 
 ## Contents
 
@@ -237,6 +240,52 @@ Three methodological commitments:
    where the blind spots are.
 3. **`silent` is the honest column** — cases examined and got wrong. It is zero,
    and that is the claim worth making, not the 56.5%.
+
+### TypeScript
+
+```bash
+npm install react express lodash zod axios date-fns chalk rxjs   # a corpus
+python benchmark/eval_typescript.py --corpus ./tscorpus --limit 700
+```
+
+```
+PRECISION  (unmutated working code; any block is a false positive)
+  files checked        700   (skipped 0, did not parse)
+  false positives      0
+  false positive rate  0.000%
+
+  blocks Node also rejects (2) -- real package defects, not ours:
+    * _lib/test.cjs:6 require("./test/vitest") -- no module at './test/vitest'
+
+RECALL  (planted hallucinations, package names verified absent)
+                            caught  declined  silent
+  invented named import        252         5       0    98.1%
+  invented package              15         0       0   100.0%
+  missing relative module      555         0       0   100.0%
+  overall                      822         5       0    99.4% all / 100.0% judged
+```
+
+Two methodological points the first run forced, both of which had been scoring
+the corpus rather than the checker:
+
+**Node adjudicates disputed blocks.** The first run reported two false
+positives. Both were real: `date-fns` ships `_lib/test.cjs` requiring
+`./test/vitest`, a file it does not publish, and `require.resolve` returns
+`MODULE_NOT_FOUND`. Asking Node rather than our own resolver keeps the
+measurement from being circular — and bleurs found a genuine broken import in a
+package with millions of weekly downloads.
+
+**A mutation only counts if it lands in code.** `date-fns` documents its API
+with `import` examples inside JSDoc comments. The first version planted
+hallucinations there and then marked the checker wrong for correctly ignoring a
+comment.
+
+Relative-path mutations are realistic typos — a dropped plural, a doubled
+letter, two adjacent characters swapped — each verified unresolvable by Node
+before being scored.
+
+Still unmeasured here: tsconfig path aliases and `baseUrl` (unit-tested, but the
+corpus has no tsconfig), and monorepo workspaces.
 
 ### Context reduction
 
@@ -530,6 +579,9 @@ before you do — and it has.
 
 ## Limitations
 
+- **TypeScript claims less than Python.** No class shapes, no instance
+  attributes, no `self` resolution — which is why its numbers are better, not
+  because the front-end is smarter.
 - **TypeScript checks packages and project files, not package APIs.** Member
   access on an npm dependency abstains, because answering it means resolving
   `.d.ts` files, `exports` maps and declaration merging — tsc's job, and not
