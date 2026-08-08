@@ -27,11 +27,19 @@ class Analyzer(Protocol):
     def analyze(self, source: str, path: Path) -> AnalysisResult: ...
 
 
+#: Every extension any front-end claims. Used by the CLI and the hook so a new
+#: language becomes visible to them the moment its analyzer is registered.
+SUPPORTED_EXTENSIONS: frozenset[str] = frozenset(
+    {".py", ".pyi", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"}
+)
+
+
 def for_path(path: Path) -> Analyzer | None:
     """Pick a front-end by file extension, or None if we don't speak it."""
     from .python import PythonAnalyzer
+    from .typescript import TypeScriptAnalyzer
 
-    analyzers: tuple[Analyzer, ...] = (PythonAnalyzer(),)
+    analyzers: tuple[Analyzer, ...] = (PythonAnalyzer(), TypeScriptAnalyzer())
     suffix = path.suffix.lower()
     for analyzer in analyzers:
         if suffix in analyzer.extensions:
@@ -39,4 +47,4 @@ def for_path(path: Path) -> Analyzer | None:
     return None
 
 
-__all__ = ["Analyzer", "AnalysisResult", "for_path"]
+__all__ = ["Analyzer", "AnalysisResult", "SUPPORTED_EXTENSIONS", "for_path"]

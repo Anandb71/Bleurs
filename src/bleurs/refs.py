@@ -108,6 +108,10 @@ class Reference:
     #: "instance" when the root is a value of that type (`x = Foo()`, `self`);
     #: "symbol" when the root is the imported thing itself.
     owner_kind: str = ""
+    #: Which package ecosystem's rules resolve this reference: "python" or
+    #: "node". The tiers differ enough -- `importlib.metadata` versus
+    #: node_modules, PyPI versus npm -- that the engine dispatches on it.
+    ecosystem: str = "python"
 
     @property
     def dotted(self) -> str:
