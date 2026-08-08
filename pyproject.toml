@@ -1,7 +1,7 @@
 [project]
 name = "bleurs"
 version = "0.1.0"
-description = "A deterministic firewall for AI coding agents. Blocks hallucinated imports and APIs before they reach disk."
+description = "Ground truth for AI coding agents. Blocks the APIs that don't exist, serves the ones that do."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

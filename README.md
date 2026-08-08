@@ -2,9 +2,9 @@
 
 # bleurs
 
-**A deterministic firewall for AI coding agents.**
+**Ground truth for AI coding agents.**
 
-Your agent invents a package. bleurs refuses the write — before it touches disk.
+Blocks the APIs that don't exist. Serves the ones that do. One index, both directions.
 
 [![CI](https://github.com/Anandb71/Bleurs/actions/workflows/ci.yml/badge.svg)](https://github.com/Anandb71/Bleurs/actions/workflows/ci.yml)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%20%E2%80%93%203.13-blue)
@@ -22,7 +22,54 @@ Look at what is **not** in that output.
 patterns that make naive checkers fire — a shadowed module name, a guarded
 optional import, dynamic attribute access, a submodule reached through its
 parent binding. Catching invented packages is easy if you are willing to be
-wrong sometimes. That silence is the hard part, and it is the entire product.
+wrong sometimes. That silence is the hard part.
+
+---
+
+## Two problems, one index
+
+Coding agents fail in two ways, and both are the same missing thing.
+
+**They assert what isn't there.** Invented packages, invented methods on real
+libraries, helpers that were never written.
+
+**They don't know what is there.** So they read whole files to find out, fill
+the context window, get compacted, forget, and read them again. Then they guess,
+which returns you to the first problem.
+
+Every tool in this space picks one. A linter tells you that you were wrong. A
+RAG index tells you what might be relevant. Neither can do the other's job,
+because they're built on different substrates — one on rules, one on embeddings.
+
+bleurs does both from the same place, because **proving a name is absent and
+enumerating the names that are present are the same query.** When it opens the
+`json` module to prove `loads_safe` isn't in it, it is holding the complete,
+exact, current list of what *is* in it. Throwing that away was the bug.
+
+So a rejection isn't a rejection. It's an answer:
+
+```
+Bleurs blocked this edit. These references do not exist:
+  - t.py:5  base64.encode_string - base64 has no attribute 'encode_string'
+  - t.py:5  json.loads_safe - json has no attribute 'loads_safe'
+
+What those containers actually provide:
+
+base64  [module]
+  b64encode(s, altchars=None)
+  b64decode(s, altchars=None, validate=False)
+  urlsafe_b64encode(s)
+  standard_b64encode(s)
+  ...
+
+json  [module]
+  dumps(obj, *, skipkeys=False, ensure_ascii=True, ...)
+  loads(s, *, cls=None, object_hook=None, ...)
+  ...
+```
+
+The agent fixes it on the next turn because it now *has* the ground truth — not
+because it guessed better. And it never opened a file to get it.
 
 ---
 
@@ -71,6 +118,74 @@ bleurs check src --exclude demo
 
 Exit 1 if anything was blocked. `--format json` for machine output, `--explain`
 to see what it could *not* verify and why.
+
+**Give your agent the index** — so it stops reading files to learn APIs:
+
+```bash
+claude mcp add bleurs -- bleurs mcp
+```
+
+Two tools: `surface` (what exists) and `verify` (what doesn't). More on the
+first one below, because it's the half that changes how a session runs.
+
+---
+
+## Stop reading files to learn APIs
+
+Compaction is a response to a symptom. The disease is that agents read whole
+files to answer questions that a few lines would settle — and then, after being
+compacted, read them again.
+
+```bash
+$ bleurs surface src/bleurs/hook.py --stats
+```
+```
+hook  [module]
+  # Claude Code PreToolUse adapter.
+  ALLOW
+  DENY
+  run(argv: list[str] | None=None) -> int
+
+~27 tokens vs ~1098 for the whole file — 41x smaller
+```
+
+The projection is lossy about implementation and **lossless about the
+interface**, which is the only thing a caller reasons over. You do not need a
+function's body to call the function correctly. You need its signature.
+
+And unlike a summary, it is *derived rather than remembered*. It can be
+recomputed from the code as it is right now, so it cannot drift, go stale, or be
+forgotten expensively. That is the actual answer to "without compaction":
+
+> **Context becomes a cache, not a ledger.**
+
+You don't compact a cache. You miss, and refetch — and here a miss costs a few
+hundred tokens instead of several thousand.
+
+### Measured, not claimed
+
+`benchmark/surface_savings.py` runs over **393 real third-party files** from
+site-packages — deliberately not this repo, whose comment density would flatter
+the result.
+
+| | |
+|---|---|
+| Whole files | ~1,323,878 tokens |
+| Projected surfaces | ~181,326 tokens |
+| **Aggregate reduction** | **7.3x** |
+| Per-file median | 6.6x |
+| Per-file p25 / p75 | 4.7x / 10.7x |
+| Worst / best case | 1.8x / 154.6x |
+
+Reproduce it yourself:
+
+```bash
+python benchmark/surface_savings.py
+```
+
+Token counts are estimated at 4 chars/token rather than measured with a real
+tokenizer, because shipping one would mean shipping a dependency. The estimate
+applies identically to both sides of every ratio, so it cancels.
 
 ---
 
@@ -165,6 +280,10 @@ Tier 3 is the one nothing else does, and it catches the failure mode that
 survives code review: the import is fine, the library is real, and the method is
 fiction.
 
+**Tiers 0 and 3 are also what `surface` runs on.** Projecting an API and proving
+one absent are the same operation read in opposite directions — which is why
+both halves of this tool are one index rather than two systems bolted together.
+
 It is also the only tier that executes third-party code, because there is no
 other way to ask an object what it contains. That happens in an isolated
 subprocess with a timeout, batched once per check run rather than once per
@@ -216,6 +335,31 @@ install from one that was never published. That distinction is the difference
 between a missing dependency and a supply-chain vulnerability.
 
 They compose well: pyright for types, bleurs for grounding.
+
+</details>
+
+<details>
+<summary><b>…use a RAG index or one of the code-graph MCP servers?</b></summary>
+
+<br>
+
+For finding code, they're good, and several are more capable at search than
+bleurs is. Two differences.
+
+**Embeddings retrieve what's similar; this retrieves what's true.** A vector
+index returns chunks that look relevant, ranked by a similarity score, and a
+chunk boundary can cut a signature in half. A surface is the complete public
+API of a container, derived from the runtime object or the parse tree, with no
+ranking step to be wrong about.
+
+**Nobody else closes the loop.** A code-graph server answers when asked. It has
+no idea the agent just wrote something false, because it isn't in the write
+path. bleurs is, and that means the moment of failure is also the moment of
+retrieval — which is the only moment you can be sure the agent actually needs
+the information.
+
+They compose fine. Use a graph server to find things; use this to be certain
+about them.
 
 </details>
 
@@ -293,6 +437,13 @@ kept first, and gates every pull request.
   hallucinations, and **0% correction** on contextual mismatches. That boundary
   is real and bleurs sits firmly on one side of it.
 - **Not a type checker.** Narrower question, no configuration, no annotations.
+- **Not a replacement for conversation compaction.** It removes the dominant
+  *cause* of context pressure in a coding session — file reads — and makes
+  forgetting cheap to recover from. Your chat history is still your chat
+  history.
+- **Not a search engine.** `surface` answers "what does this contain" for a
+  target you name. It will not find the target for you. Pair it with a
+  code-search tool.
 - **Not multi-language yet.** Python only. The front-end interface is already
   factored for tree-sitter backends — see the roadmap.
 
@@ -352,8 +503,14 @@ the reason the dogfood job exists.
   resolution rather than reimplementing it badly.
 - **A recall benchmark** against a public corpus of model-generated code, so
   "87.6%" becomes a number this repo measures instead of one it cites.
-- **Retrieval.** Once you can prove what exists, you can start fetching it
-  instead of generating it.
+- **Task-scoped working sets.** `surface` answers one target at a time. The
+  next step is projecting the whole set of modules a task actually touches into
+  one budgeted context block, recomputed on demand instead of accumulated.
+- **Grounded generation.** The end state, and the reason the original design
+  notes existed. Once you can enumerate exactly what a piece of code is allowed
+  to reference, you can hand that set to the model *before* it writes rather
+  than checking afterwards — the difference between a spell-checker and a
+  keyboard that only has real words on it.
 
 ---
 
