@@ -528,6 +528,15 @@ class Engine:
         if self.project is None or current is None or not ref.path:
             return _abstain(ref, AbstainReason.UNRESOLVED_BINDING, "no project index")
 
+        if ref.owner in current.patched:
+            # Something in this file attached an attribute to that name, so its
+            # surface is larger than any reading of the class will show.
+            return _abstain(
+                ref,
+                AbstainReason.OPEN_CLASS,
+                f"{ref.owner} has attributes attached in this file",
+            )
+
         symbol = self._resolve_owner(ref.owner, current)
         if symbol is None:
             return _abstain(
@@ -549,6 +558,12 @@ class Engine:
                 )
             if wanted in surface:
                 return _allow(ref, "defined on the class", "project")
+            if ref.owner_kind == "self" and self.project.is_subclassed(symbol.name):
+                return _abstain(
+                    ref,
+                    AbstainReason.OPEN_CLASS,
+                    f"{symbol.name} is subclassed, so self may be a subclass",
+                )
             return Finding(
                 reference=ref,
                 verdict=Verdict.BLOCK,
@@ -559,6 +574,12 @@ class Engine:
             )
 
         if symbol.kind == "module":
+            if self._shadows_stdlib(symbol.module):
+                return _abstain(
+                    ref,
+                    AbstainReason.LOCAL_UNRESOLVED,
+                    f"{symbol.module} shadows a stdlib module name",
+                )
             if not self.project.exports_known(symbol.module):
                 return _abstain(
                     ref, AbstainReason.LOCAL_UNRESOLVED, "module surface is open"
@@ -623,6 +644,13 @@ class Engine:
 
         # Project-local modules are answered from the index, never by import --
         # loading the user's own half-written code would be both slow and rude.
+        if self._shadows_stdlib(module):
+            return _abstain(
+                ref,
+                AbstainReason.LOCAL_UNRESOLVED,
+                f"{module} is both a project module and a stdlib module",
+            )
+
         if self._is_local(module):
             return self._judge_local_member(ref)
 
@@ -718,23 +746,38 @@ class Engine:
         )
 
     def _judge_local_member(self, ref: Reference) -> Finding:
-        assert self.local is not None
+        """`from app.utils import helper` -- does that module export the name?
+
+        Answered from the project index rather than a second, simpler parser.
+        Two parsers for the same question drifted: the older one read only
+        top-level statements, so a name defined under `try:` or `if
+        TYPE_CHECKING:` looked undefined, and it missed nested wildcard imports
+        that should have made it abstain outright.
+        """
+        assert self.project is not None
         module = ref.module
         name = ref.path[0] if ref.path else ""
 
         # `from pkg import subpkg` -- the member is itself a module.
-        if self.local.has_module(f"{module}.{name}"):
-            return _allow(ref, "project submodule", "local")
+        if self.project.has_module(f"{module}.{name}"):
+            return _allow(ref, "project submodule", "project")
 
-        members = self.local.members(module)
-        if members is None:
+        if not self.project.exports_known(module):
             return _abstain(
                 ref,
                 AbstainReason.LOCAL_UNRESOLVED,
-                f"could not read the surface of {module}",
+                f"{module} re-exports openly or generates names",
             )
-        if name in members:
-            return _allow(ref, "defined in this project", "local")
+
+        info = self.project.module(module)
+        if info is None:
+            return _abstain(
+                ref, AbstainReason.LOCAL_UNRESOLVED, f"could not read {module}"
+            )
+
+        names = set(info.symbols) | set(info.imports)
+        if name in names:
+            return _allow(ref, "defined in this project", "project")
 
         # Attribute chains deeper than one level would need real type
         # inference to follow. We only claim what we can prove.
@@ -748,14 +791,25 @@ class Engine:
             verdict=Verdict.BLOCK,
             confidence=Confidence.ABSENT,
             message=f"{module} defines no {name!r}",
-            suggestion=_closest(name, tuple(members)),
-            resolver="local",
+            suggestion=_closest(name, tuple(sorted(names))),
+            resolver="project",
         )
 
     # -- helpers ---------------------------------------------------------
 
     def _is_local(self, module: str) -> bool:
         return self.local is not None and self.local.has_module(module)
+
+    def _shadows_stdlib(self, module: str) -> bool:
+        """Does a project file share its name with a standard library module?
+
+        `_pytest/warnings.py`, `pydantic/warnings.py` and any flat-layout
+        project with a `logging.py` or `types.py` at its root create this.
+        Which module `import warnings` actually resolves to depends on
+        `sys.path` order at runtime, so there is no answer to give and the only
+        correct move is to decline.
+        """
+        return self._is_local(module) and is_stdlib(module)
 
     def _nearest_installed(self, name: str) -> str | None:
         from .truth import installed_top_levels

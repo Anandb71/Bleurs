@@ -254,6 +254,13 @@ class PythonAnalyzer:
             for child in node.body:
                 if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     continue
+                if _is_staticmethod(child):
+                    # A static method has no receiver. Treating its first
+                    # parameter as `self` claimed that every argument was an
+                    # instance of the enclosing class -- which is how
+                    # `config.getini(...)` inside a @staticmethod came back as
+                    # "Cache has no attribute 'getini'".
+                    continue
                 params = child.args.posonlyargs + child.args.args
                 if not params:
                     continue
@@ -262,7 +269,7 @@ class PythonAnalyzer:
                     continue  # ambiguous; the file-wide pass owns this name
                 self._emit_bound(
                     child,
-                    {receiver: (node.name, "instance")},
+                    {receiver: (node.name, "self")},
                     guards,
                     result,
                     scope=child,
@@ -698,14 +705,64 @@ def _collect_bindings(tree: ast.AST) -> tuple[Bindings, set[str], bool]:
     for name in ambiguous:
         bindings.modules.pop(name, None)
 
+    escaped = _escaping_names(tree)
     for name, values in assignments.items():
         if len(values) != 1 or name in hard_bound:
             continue  # assigned more than once, or bound some other way too
+        if name in escaped:
+            # The object was handed to something else, which may have attached
+            # attributes to it. See _escaping_names.
+            continue
         constructed = _constructor_name(values[0])
         if constructed:
             bindings.instances[name] = constructed
 
     return bindings, shadowed, star
+
+
+def _is_staticmethod(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    for decorator in node.decorator_list:
+        target = decorator.func if isinstance(decorator, ast.Call) else decorator
+        name = (
+            target.attr
+            if isinstance(target, ast.Attribute)
+            else target.id if isinstance(target, ast.Name) else ""
+        )
+        if name == "staticmethod":
+            return True
+    return False
+
+
+def _escaping_names(tree: ast.AST) -> set[str]:
+    """Names whose object is handed to something we cannot see.
+
+    Python objects are open: any code holding a reference can attach an
+    attribute to it. `setattr(user, "x", 1)`, or
+
+        def decorate(u):
+            u.decorated = True
+
+        decorate(user)
+
+    both give `user` an attribute that no reading of its class will ever show.
+    So the moment a bound name is used as a bare value -- passed to a call,
+    returned, stored in a container -- we stop claiming to know its surface.
+
+    Reading through it does not count: in `print(user.email)` the argument is
+    `user.email`, not `user`, and the object itself never leaves.
+    """
+    inner: set[int] = {
+        id(node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+    }
+
+    escaped: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            if id(node) not in inner:
+                escaped.add(node.id)
+    return escaped
 
 
 def _bind_module(

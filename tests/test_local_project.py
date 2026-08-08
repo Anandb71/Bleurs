@@ -35,7 +35,7 @@ def test_missing_local_helper_is_blocked(make_engine, project):
         project / "main.py",
     )
     assert len(report.blocks) == 1
-    assert report.blocks[0].resolver == "local"
+    assert report.blocks[0].resolver == "project"
 
 
 def test_existing_local_helper_passes(make_engine, project):

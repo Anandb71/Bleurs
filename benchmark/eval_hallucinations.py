@@ -234,7 +234,7 @@ def plant(
 # -- passes --------------------------------------------------------------
 
 
-def precision_pass(files: list[Path], engine: Engine) -> tuple[int, list[str]]:
+def precision_pass(files: list[Path], engines) -> tuple[int, list[str]]:
     """Any block on unmutated, working code is a false positive."""
     false_positives: list[str] = []
     checked = 0
@@ -243,6 +243,7 @@ def precision_pass(files: list[Path], engine: Engine) -> tuple[int, list[str]]:
             source = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        engine = engines.for_file(path)
         report = engine.check_source(source, path)
         if report.parse_error:
             continue
@@ -256,7 +257,7 @@ def precision_pass(files: list[Path], engine: Engine) -> tuple[int, list[str]]:
 
 
 def recall_pass(
-    files: list[Path], engine: Engine, introspector: Introspector, rng: random.Random
+    files: list[Path], engines, introspector: Introspector, rng: random.Random
 ) -> dict[str, Tally]:
     tallies: dict[str, Tally] = {}
     for path in files:
@@ -264,6 +265,7 @@ def recall_pass(
             source = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        engine = engines.for_file(path)
         for planted in plant(source, rng, introspector, engine.registry):
             tally = tallies.setdefault(planted.kind, Tally())
             report = engine.check_source(planted.source, path)
@@ -306,6 +308,55 @@ def recall_pass(
     return tallies
 
 
+class EngineSet:
+    """One engine per installed package, rooted at that package's directory.
+
+    The first version of this harness built a single engine with no
+    `project_root`, which silently disabled tier 0 entirely -- so the class
+    shapes, `self` resolution and instance-attribute checking were never
+    measured at all, and a 0% false positive rate was being reported for a
+    configuration nobody runs.
+
+    Rooting each file at its own package is the realistic setup: it is what
+    happens when an agent edits a file inside the project that owns it.
+    """
+
+    def __init__(self, *, network: bool) -> None:
+        self.network = network
+        self._engines: dict[Path, Engine] = {}
+        self._shared_registry = None
+
+    def for_file(self, path: Path) -> Engine:
+        root = self._root_for(path)
+        engine = self._engines.get(root)
+        if engine is None:
+            engine = Engine(Config(project_root=root, network=self.network))
+            # Share one registry so the corpus is not re-fetched per package.
+            if self._shared_registry is None:
+                self._shared_registry = engine.registry
+            else:
+                engine.registry = self._shared_registry
+            self._engines[root] = engine
+        return engine
+
+    @staticmethod
+    def _root_for(path: Path) -> Path:
+        for key in ("purelib", "platlib"):
+            base = sysconfig.get_paths().get(key)
+            if not base:
+                continue
+            try:
+                relative = path.resolve().relative_to(Path(base))
+            except (ValueError, OSError):
+                continue
+            return Path(base) / relative.parts[0] if relative.parts else Path(base)
+        return path.parent
+
+    @property
+    def registry(self):
+        return self._shared_registry
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=120)
@@ -318,12 +369,12 @@ def main() -> int:
         return 1
 
     rng = random.Random(SEED)
-    engine = Engine(Config(network=not args.offline))
+    engines = EngineSet(network=not args.offline)
     introspector = Introspector()
 
     print(f"corpus: {len(files)} real files from site-packages\n")
 
-    checked, false_positives = precision_pass(files, engine)
+    checked, false_positives = precision_pass(files, engines)
     rate = len(false_positives) / checked if checked else 0.0
     print("PRECISION  (unmutated working code; any block is a false positive)")
     print(f"  files checked        {checked}")
@@ -333,7 +384,7 @@ def main() -> int:
         print(f"    ! {example}")
     print()
 
-    tallies = recall_pass(files, engine, introspector, rng)
+    tallies = recall_pass(files, engines, introspector, rng)
     total = Tally()
     print("RECALL  (planted hallucinations, each verified absent before counting)")
     print(f"  {'':22} {'caught':>7} {'declined':>9} {'silent':>7}")

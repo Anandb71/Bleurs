@@ -51,7 +51,45 @@ INERT_BASES = frozenset({"object", "Protocol", "typing.Protocol", "ABC", "abc.AB
 #: Calls in a class body that put attributes beyond our reach.
 ESCAPE_CALLS = frozenset({"setattr", "vars", "globals", "locals", "exec", "eval"})
 
+#: Attributes every object carries whether or not the class body mentions them.
+#: Without these, `self.__dict__.update(...)` and `self.__class__.__name__` --
+#: both entirely ordinary -- came back as invented.
+OBJECT_ATTRIBUTES: frozenset[str] = frozenset(dir(object)) | frozenset(
+    {
+        "__dict__",
+        "__weakref__",
+        "__module__",
+        "__qualname__",
+        "__name__",
+        "__bases__",
+        "__mro__",
+        "__annotations__",
+        "__slots__",
+        "__type_params__",
+    }
+)
+
 _MAX_BASE_DEPTH = 12
+
+
+def _flatten(body) -> list:
+    """Statements in a body, descending through conditionals and try blocks.
+
+    Names are routinely defined inside `if`/`try` at module level and inside
+    class bodies too -- aiohttp declares `def request` under
+    `if sys.version_info >= (3, 11) and TYPE_CHECKING:`. Reading only the
+    top-level statements made every one of those look undefined.
+    """
+    out = []
+    for node in body:
+        out.append(node)
+        if isinstance(node, (ast.If, ast.Try, ast.With, ast.AsyncWith)):
+            out.extend(_flatten(node.body))
+            out.extend(_flatten(getattr(node, "orelse", [])))
+            out.extend(_flatten(getattr(node, "finalbody", [])))
+            for handler in getattr(node, "handlers", []):
+                out.extend(_flatten(handler.body))
+    return out
 
 
 @dataclass(frozen=True)
@@ -89,6 +127,11 @@ class ModuleInfo:
     imports: dict[str, tuple[str, str]] = field(default_factory=dict)
     star_import: bool = False
     dynamic: bool = False
+    #: Local names that had an attribute attached to them somewhere in this
+    #: file -- `User.extra = 1`. Recorded by local name rather than by resolved
+    #: symbol, because the class is usually imported and the patch is what the
+    #: reader of *this* file can see.
+    patched: set[str] = field(default_factory=set)
 
 
 class ProjectIndex:
@@ -103,6 +146,7 @@ class ProjectIndex:
         #: judgement may define the very class it then uses -- and may not
         #: exist on disk at all.
         self.overlay: ModuleInfo | None = None
+        self._subclassed: frozenset[str] | None = None
 
     # -- module access ---------------------------------------------------
 
@@ -175,6 +219,32 @@ class ProjectIndex:
         # Re-exported from outside the project. Real, but not ours to describe.
         return None
 
+    def is_subclassed(self, class_name: str) -> bool:
+        """Does anything in the project inherit from this class?
+
+        `self.X` is not a claim about the defining class. At runtime `self` is
+        an instance of whatever subclass was constructed, and a mixin exists
+        precisely to call methods it does not define -- aiohttp's
+        `AsyncStreamReaderMixin.readline` being the case that forced this.
+
+        So when a class is inherited from anywhere we know about, an attribute
+        missing from it is not missing from `self`. Computed once, lazily, and
+        only on the path where we were about to block.
+        """
+        if self._subclassed is None:
+            names: set[str] = set()
+            for dotted in self.modules.all_modules()[:2000]:
+                info = self.module(dotted)
+                if info is None:
+                    continue
+                for symbol in info.symbols.values():
+                    if symbol.shape is None:
+                        continue
+                    for base in symbol.shape.bases:
+                        names.add(base.split(".")[-1])
+            self._subclassed = frozenset(names)
+        return class_name in self._subclassed
+
     def exports_known(self, module: str) -> bool:
         """Can we enumerate everything this module exports?"""
         info = self.module(module)
@@ -202,7 +272,7 @@ class ProjectIndex:
             return frozenset()  # diamond or cycle; contributes nothing new
         seen.add(key)
 
-        names = set(shape.own)
+        names = set(shape.own) | OBJECT_ATTRIBUTES
         for base in shape.bases:
             if base in INERT_BASES:
                 continue
@@ -242,7 +312,7 @@ def parse_module(dotted: str, path: Path, source: str) -> ModuleInfo:
     info = ModuleInfo(dotted=dotted, path=path)
     tree = ast.parse(source)
 
-    for node in tree.body:
+    for node in _flatten(tree.body):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if node.name == "__getattr__":
                 info.dynamic = True
@@ -250,6 +320,19 @@ def parse_module(dotted: str, path: Path, source: str) -> ModuleInfo:
 
         elif isinstance(node, ast.ClassDef):
             shape = class_shape(node, dotted)
+            existing = info.symbols.get(node.name)
+            if existing is not None:
+                # Defined twice -- almost always one definition per branch of a
+                # version or platform test. Which one exists at runtime depends
+                # on the interpreter, so neither surface can be claimed.
+                shape = ClassShape(
+                    name=shape.name,
+                    module=shape.module,
+                    own=shape.own | (existing.shape.own if existing.shape else frozenset()),
+                    bases=shape.bases,
+                    self_closed=False,
+                    reason="defined more than once in this module",
+                )
             info.symbols[node.name] = Symbol(node.name, dotted, "class", shape)
 
         elif isinstance(node, ast.Assign):
@@ -277,7 +360,46 @@ def parse_module(dotted: str, path: Path, source: str) -> ModuleInfo:
                     continue
                 info.imports[alias.asname or alias.name] = (origin, alias.name)
 
+    _open_monkeypatched(tree, info)
     return info
+
+
+def _open_monkeypatched(tree: ast.AST, info: ModuleInfo) -> None:
+    """`User.extra = 1` anywhere in the file opens User's surface.
+
+    Python classes are mutable. A module that attaches an attribute to a class
+    after defining it has enlarged that class's surface by an amount we cannot
+    track through every later read, so the honest response is to stop claiming
+    the surface is complete.
+    """
+    for node in ast.walk(tree):
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
+        for target in targets:
+            if not isinstance(target, ast.Attribute):
+                continue
+            if not isinstance(target.value, ast.Name):
+                continue
+            info.patched.add(target.value.id)
+            symbol = info.symbols.get(target.value.id)
+            if symbol is None or symbol.shape is None:
+                continue
+            info.symbols[symbol.name] = Symbol(
+                name=symbol.name,
+                module=symbol.module,
+                kind=symbol.kind,
+                shape=ClassShape(
+                    name=symbol.shape.name,
+                    module=symbol.shape.module,
+                    own=symbol.shape.own,
+                    bases=symbol.shape.bases,
+                    self_closed=False,
+                    reason="attributes attached to the class after definition",
+                ),
+            )
 
 
 def _absolute_origin(dotted: str, path: Path, node: ast.ImportFrom) -> str | None:
@@ -306,12 +428,16 @@ def class_shape(node: ast.ClassDef, module: str) -> ClassShape:
             break
 
     names: set[str] = set()
-    for child in node.body:
+    for child in _flatten(node.body):
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
             names.add(child.name)
             if child.name in {"__getattr__", "__getattribute__"}:
                 reason = reason or "defines __getattr__"
             names |= _self_assignments(child)
+        elif isinstance(child, ast.ClassDef):
+            # A nested class is an attribute of the outer one. Omitting it made
+            # `Outer.Inner` look invented.
+            names.add(child.name)
         elif isinstance(child, ast.Assign):
             for target in child.targets:
                 if isinstance(target, ast.Name):
