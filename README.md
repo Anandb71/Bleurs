@@ -28,13 +28,14 @@ something without reading the file that implements it.
 
 ## Results
 
-Measured on 150 real files from `site-packages`, reproducible with two commands.
+Measured on 200 real files from `site-packages`, each rooted at its own package
+so every resolution tier is active. Reproducible with two commands.
 
 | Metric | Result | Method |
 |---|---|---|
-| **False positive rate** | **0.000%** (0 / 150 files) | Unmutated installed code. Every reference resolves by construction, so any block is a false positive. |
-| **Hallucinations caught** | **231 / 400** (57.8%) | Planted into real files; each planted name verified absent before scoring. |
-| **Judged incorrectly** | **0** | The other 169 were declined with a stated reason, not guessed at. |
+| **False positive rate** | **0.000%** (0 / 200 files) | Unmutated installed code. Every reference resolves by construction, so any block is a false positive. |
+| **Hallucinations caught** | **287 / 508** (56.5%) | Planted into real files; each planted name verified absent before scoring. |
+| **Judged incorrectly** | **0** | The other 221 were declined with a stated reason, not guessed at. |
 | **Context reduction** | **7.3x** aggregate, 6.6x median | 393 files: 1,323,878 tokens of source → 181,326 tokens of projected surface. |
 
 The third row is the one that matters. bleurs never reached a wrong verdict on a
@@ -170,7 +171,7 @@ Two harnesses, both in [`benchmark/`](benchmark), both reproducible.
 ### Precision
 
 ```bash
-python benchmark/eval_hallucinations.py --limit 150
+python benchmark/eval_hallucinations.py --limit 200
 ```
 
 Runs bleurs over unmutated files from `site-packages`. Those files are
@@ -180,16 +181,28 @@ no judgement call, no opportunity to grade our own homework.
 
 ```
 PRECISION  (unmutated working code; any block is a false positive)
-  files checked        150
+  files checked        200
   false positives      0
   false positive rate  0.000%
 ```
 
-This number was not 0 to begin with. The first run reported **20%**, and every
-one of those was a real bug: platform-specific stdlib modules, platform-varying
-stdlib contents, `hasattr` guards, type-only positions, and ambiguous module
-bindings. All five are fixed and pinned by regression tests
+**This number has been 0 exactly twice, and both times it took work to get
+there.** The first run of this harness reported 20%; five real bugs, all fixed
 ([`64dbf1c`](https://github.com/Anandb71/Bleurs/commit/64dbf1c)).
+
+Then a worse problem surfaced — in the harness itself. It built its engine
+without a `project_root`, which silently disabled tier 0, so class shapes,
+`self` resolution and instance-attribute checking were never measured at all
+and a 0% rate was being published for a configuration nobody runs. Rooting each
+file at its own package turned the tier on and the rate went to **12%**: nine
+further false-positive classes, from `@staticmethod` receivers to mixins to a
+project `warnings.py` shadowing the stdlib. All nine are fixed and pinned in
+[`tests/test_regressions.py`](tests/test_regressions.py), one test per bug with
+the library that produced it named
+([`f7ec0fa`](https://github.com/Anandb71/Bleurs/commit/f7ec0fa)).
+
+The lesson is worth stating plainly: a benchmark that does not exercise the
+feature you are claiming for measures nothing, however good its number looks.
 
 ### Recall
 
@@ -200,15 +213,16 @@ published. Ground truth is exact because we know what was broken and where.
 ```
 RECALL  (planted hallucinations, each verified absent before counting)
                           caught  declined  silent
-  invented API                48        88       0
-  invented import name        70        76       0
-  invented package           113         5       0
-  overall                    231       169       0    57.8% all / 100.0% judged
+  invented API                53       116       0
+  invented import name        91        99       0
+  invented package           143         6       0
+  overall                    287       221       0    56.5% all / 100.0% judged
 
   why bleurs declined to judge:
-      83  module defines __getattr__, so any attribute may be valid
-      51  stdlib module whose contents differ between platforms
-      24  reference is inside a try/except that handles it failing
+     102  module defines __getattr__, so any attribute may be valid
+      56  stdlib module whose contents differ between platforms
+      41  reference is inside a try/except that handles it failing
+      11  resolves to project-local code we could not index
       11  dropped before judging (wildcard import, shadowed name, ...)
 ```
 
@@ -222,7 +236,7 @@ Three methodological commitments:
    positive rate at zero. Folding those in with genuine blind spots would hide
    where the blind spots are.
 3. **`silent` is the honest column** — cases examined and got wrong. It is zero,
-   and that is the claim worth making, not the 57.8%.
+   and that is the claim worth making, not the 56.5%.
 
 ### Context reduction
 
