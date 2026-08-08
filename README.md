@@ -34,16 +34,19 @@ so every resolution tier is active. Reproducible with two commands.
 | Metric | Result | Method |
 |---|---|---|
 | **False positive rate** | **0.000%** (0 / 200 files) | Unmutated installed code. Every reference resolves by construction, so any block is a false positive. |
-| **Hallucinations caught** | **287 / 508** (56.5%) | Planted into real files; each planted name verified absent before scoring. |
-| **Judged incorrectly** | **0** | The other 221 were declined with a stated reason, not guessed at. |
-| **Context reduction** | **7.3x** aggregate, 6.6x median | 393 files: 1,323,878 tokens of source → 181,326 tokens of projected surface. |
+| **Hallucinations caught** | **424 / 508** (83.5%) | Planted into real files; each planted name verified absent before scoring. |
+| **Judged incorrectly** | **0** | The other 84 were declined with a stated reason, not guessed at. |
+| **Context reduction** | **7.3x** single file, **4.1x** whole working set | 393 projections and 36 dependency closures, both from installed packages. |
 | **TypeScript, same method** | **0 / 700 files**, 822 / 827 caught | A `node_modules` of 103 packages. Disputed blocks adjudicated by Node itself. |
 
 The third row is the one that matters. bleurs never reached a wrong verdict on a
 planted hallucination — it either caught it or said out loud that it was not
 judging. See [Evidence](#evidence) for methodology and how to reproduce.
 
-TypeScript scores higher on recall (99.4% against 56.5%) for an unglamorous
+Across both languages that is **1,246 of 1,335 planted hallucinations caught
+(93.3%), zero false positives across 900 files, and nothing judged wrongly.**
+
+TypeScript scores higher on recall (99.4% against 83.5%) for an unglamorous
 reason: **it claims less.** Node's module resolution is a filesystem walk with
 deterministic fallbacks, while Python's surface is dynamic. The TypeScript
 front-end also does not implement class shapes or instance attributes at all —
@@ -223,15 +226,13 @@ published. Ground truth is exact because we know what was broken and where.
 ```
 RECALL  (planted hallucinations, each verified absent before counting)
                           caught  declined  silent
-  invented API                53       116       0
-  invented import name        91        99       0
+  invented API               100        69       0
+  invented import name       181         9       0
   invented package           143         6       0
-  overall                    287       221       0    56.5% all / 100.0% judged
+  overall                    424        84       0    83.5% all / 100.0% judged
 
   why bleurs declined to judge:
-     102  module defines __getattr__, so any attribute may be valid
-      56  stdlib module whose contents differ between platforms
-      41  reference is inside a try/except that handles it failing
+      62  reference is inside a try/except that handles it failing
       11  resolves to project-local code we could not index
       11  dropped before judging (wildcard import, shadowed name, ...)
 ```
@@ -246,7 +247,26 @@ Three methodological commitments:
    positive rate at zero. Folding those in with genuine blind spots would hide
    where the blind spots are.
 3. **`silent` is the honest column** — cases examined and got wrong. It is zero,
-   and that is the claim worth making, not the 56.5%.
+   and that is the claim worth making, not the 83.5%.
+
+Recall was 56.5% earlier in this project's life. Two changes moved it, and
+neither was a loosened threshold:
+
+**`__getattr__` was being treated as a fog rather than a function.** A module
+defining PEP 562 `__getattr__` abstained outright — but `typing` defines one and
+still raises `AttributeError` for a name it does not have. That is the module
+itself answering, with more authority than any listing we could assemble. Asking
+it instead of guessing about it moved recall to 75.4%.
+
+**Introspection sees one operating system.** `signal.SIGQUIT` is real on Unix
+and absent on Windows, so it had to abstain alongside `signal.register_all`,
+which is real nowhere. CI runs three platforms across four Python versions, so
+all twelve jobs now report what they see and the union ships as a 52 KB table.
+A name absent from every one of them exists nowhere. That took it to 83.5%.
+
+The table is only ever allowed to permit: no entry, or an interpreter outside
+its range, means no opinion and the caller keeps abstaining. A stale table costs
+recall and can never cause a false block.
 
 ### TypeScript
 
