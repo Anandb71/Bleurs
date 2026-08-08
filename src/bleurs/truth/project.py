@@ -402,19 +402,37 @@ def _open_monkeypatched(tree: ast.AST, info: ModuleInfo) -> None:
             )
 
 
+def anchor_relative(
+    own_dotted: str, is_package_init: bool, level: int, fragment: str
+) -> str | None:
+    """Turn `from ..refs import X` into the absolute module it names.
+
+    `own_dotted` is the importing file's own dotted name. A package's
+    `__init__.py` *is* its package, so one dot means "here"; for any other
+    module one dot means the package containing it.
+
+    Shared by the engine and the working-set builder deliberately. The last
+    time two places in this project answered one question independently they
+    drifted, and the older copy silently missed half the answers.
+    """
+    parts = own_dotted.split(".")
+    if not is_package_init:
+        parts = parts[:-1]
+    if level > 1:
+        parts = parts[: -(level - 1)]
+    if not parts:
+        return None
+    if fragment:
+        parts.append(fragment)
+    return ".".join(parts)
+
+
 def _absolute_origin(dotted: str, path: Path, node: ast.ImportFrom) -> str | None:
     if not node.level:
         return node.module
-    parts = dotted.split(".")
-    if path.name != "__init__.py":
-        parts = parts[:-1]
-    if node.level > 1:
-        parts = parts[: -(node.level - 1)]
-    if not parts:
-        return None
-    if node.module:
-        parts.append(node.module)
-    return ".".join(parts)
+    return anchor_relative(
+        dotted, path.name == "__init__.py", node.level, node.module or ""
+    )
 
 
 def class_shape(node: ast.ClassDef, module: str) -> ClassShape:

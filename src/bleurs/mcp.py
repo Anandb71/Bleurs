@@ -75,6 +75,41 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "context",
+        "description": (
+            "Get everything you need to edit a file correctly, in one budgeted "
+            "block: the file's own API plus the exact surface of every module it "
+            "imports, followed transitively through project code.\n\n"
+            "Call this INSTEAD OF reading a file and its dependencies, before "
+            "you start editing. It is a dependency closure computed from the "
+            "code — not a similarity search — so it contains what the file "
+            "actually uses, and it is typically several times cheaper than "
+            "reading the same files. Ask again whenever you need it rather than "
+            "holding it in context."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "The file or files you are about to edit.",
+                },
+                "budget": {
+                    "type": "integer",
+                    "description": "Approximate token budget. Default 6000.",
+                },
+                "depth": {
+                    "type": "integer",
+                    "description": (
+                        "How far to follow project-local imports. Default 1."
+                    ),
+                },
+            },
+            "required": ["paths"],
+        },
+    },
+    {
         "name": "verify",
         "description": (
             "Check Python source for references that provably do not exist -- "
@@ -169,7 +204,36 @@ def _tool_verify(args: dict[str, Any], root: Path | None) -> str:
     return "\n".join(lines).rstrip()
 
 
+def _tool_context(args: dict[str, Any], root: Path | None) -> str:
+    from .context import build
+
+    raw = args.get("paths")
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list) or not raw:
+        return "error: 'paths' is required"
+
+    base = root or Path.cwd()
+    seeds: list[Path] = []
+    for item in raw:
+        candidate = Path(str(item))
+        candidate = candidate if candidate.is_absolute() else base / candidate
+        if candidate.is_file():
+            seeds.append(candidate)
+    if not seeds:
+        return f"error: none of those files exist: {', '.join(str(p) for p in raw)}"
+
+    working = build(
+        seeds,
+        project_root=root,
+        budget=int(args.get("budget") or 6000),
+        depth=int(args.get("depth") or 1),
+    )
+    return working.render()
+
+
 HANDLERS: dict[str, Callable[[dict[str, Any], Path | None], str]] = {
+    "context": _tool_context,
     "surface": _tool_surface,
     "verify": _tool_verify,
 }

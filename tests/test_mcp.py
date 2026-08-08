@@ -66,7 +66,7 @@ def test_unknown_method_is_an_error_not_a_crash():
 
 def test_tools_are_advertised_with_schemas():
     tools = call("tools/list")["result"]["tools"]
-    assert {t["name"] for t in tools} == {"surface", "verify"}
+    assert {t["name"] for t in tools} == {"surface", "verify", "context"}
     for entry in tools:
         assert entry["inputSchema"]["type"] == "object"
         assert entry["description"].strip()

@@ -126,13 +126,12 @@ class LocalIndex:
             return
         self._built = True
 
-        roots = [self.root]
-        src = self.root / "src"
-        if src.is_dir():
-            roots.append(src)
-
+        # `_bases()` puts src/ first, and this walk must agree with it: a
+        # src-layout project's module is `pkg.mod`, not `src.pkg.mod`, and
+        # registering the root-relative name first made every dotted name
+        # non-canonical.
         seen = 0
-        for base in roots:
+        for base in self._bases():
             for path in _walk_python_files(base):
                 seen += 1
                 if seen > _MAX_FILES:

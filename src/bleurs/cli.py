@@ -41,6 +41,8 @@ def main(argv: list[str] | None = None) -> int:
         from .mcp import serve
 
         return serve(Path(args.root).resolve() if args.root else Path.cwd())
+    if args.command == "context":
+        return _cmd_context(args)
     if args.command == "surface":
         return _cmd_surface(args)
     if args.command == "demo":
@@ -111,6 +113,58 @@ def _cmd_surface(args) -> int:
         print(paint(line + "  (estimated at 4 chars/token)", "dim"))
 
     return 0 if surface.ok else 1
+
+
+def _cmd_context(args) -> int:
+    """Project everything needed to edit a file, instead of reading them all."""
+    from .context import build
+    from .surface import estimate_tokens
+
+    seeds = [Path(p) for p in args.paths if Path(p).is_file()]
+    missing = [p for p in args.paths if not Path(p).is_file()]
+    for name in missing:
+        print(f"no such file: {name}", file=sys.stderr)
+    if not seeds:
+        return 1
+
+    root = Path(args.root).resolve() if args.root else _infer_root(seeds[0])
+    working = build(
+        seeds,
+        project_root=root,
+        budget=args.budget,
+        depth=args.depth,
+        introspect=not args.no_introspect,
+    )
+    print(working.render())
+
+    if args.stats:
+        paint = Painter()
+        raw = sum(
+            estimate_tokens(p.read_text(encoding="utf-8", errors="replace"))
+            for p in _working_set_files(working, root, seeds)
+        )
+        line = (
+            f"~{working.used} tokens across {len(working.sections)} modules; "
+            f"reading the equivalent files costs ~{raw} "
+            f"{paint.dash} {raw / max(working.used, 1):.1f}x"
+        )
+        print(paint(line, "dim"))
+    return 0
+
+
+def _working_set_files(working, root: Path | None, seeds: list[Path]) -> set[Path]:
+    """The files a working set stands in for, for the honest comparison."""
+    from .truth.local import LocalIndex
+
+    paths = set(seeds)
+    if root is None:
+        return paths
+    index = LocalIndex(root)
+    for section in working.sections:
+        found = index.path_for(section.key)
+        if found is not None:
+            paths.add(found)
+    return paths
 
 
 def _cmd_demo(args) -> int:
@@ -324,6 +378,24 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="emit a JSON permission decision instead of using exit codes",
     )
+
+    context = sub.add_parser(
+        "context",
+        help="project everything needed to edit a file, in one budgeted block",
+    )
+    context.add_argument("paths", nargs="+", help="the file(s) you are about to edit")
+    context.add_argument("--root", help="project root")
+    context.add_argument(
+        "--budget", type=int, default=6000, help="token budget (default 6000)"
+    )
+    context.add_argument(
+        "--depth",
+        type=int,
+        default=1,
+        help="how far to follow project-local imports (default 1)",
+    )
+    context.add_argument("--no-introspect", action="store_true")
+    context.add_argument("--stats", action="store_true")
 
     surface = sub.add_parser(
         "surface",
