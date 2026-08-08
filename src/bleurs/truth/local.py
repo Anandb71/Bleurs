@@ -67,6 +67,11 @@ class LocalIndex:
         prefix = top_level + "."
         return any(m == top_level or m.startswith(prefix) for m in self._modules)
 
+    def path_for(self, dotted: str) -> Path | None:
+        """The file a project module lives in, if we indexed it."""
+        self._build()
+        return self._modules.get(dotted)
+
     def dotted_for(self, path: Path) -> str | None:
         """The dotted name of a file inside the project, if it is one.
 

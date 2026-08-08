@@ -108,6 +108,8 @@ class Engine:
             if finding.abstained is not None:
                 report.abstentions.add(finding.abstained)
 
+        self._attach_surfaces(report)
+
         self.registry.flush()
         if self.registry.network_failed:
             report.abstentions.add(AbstainReason.NO_NETWORK)
@@ -123,6 +125,49 @@ class Engine:
             report.parse_error = str(exc)
             return report
         return self.check_source(source, path)
+
+    # -- grounding -------------------------------------------------------
+
+    def _attach_surfaces(self, report: Report) -> None:
+        """Give every block the real API of the thing it got wrong.
+
+        Rejecting an edit without saying what was available leaves the agent
+        exactly where it started, and it will guess again. Attaching the
+        container's actual surface turns the block into the answer -- and costs
+        one extra subprocess, only on the path where we were about to reject
+        the write anyway.
+        """
+        blocks = report.blocks
+        if not blocks:
+            return
+
+        from .surface import local_surface, render
+
+        wanted: list[tuple[str, tuple[str, ...]]] = []
+        for finding in blocks:
+            ref = finding.reference
+            if ref.kind is RefKind.MODULE or self._is_local(ref.module):
+                continue
+            # Project the container, not the missing name: the whole point is
+            # to show what is there instead of what is not.
+            wanted.append((ref.module, ref.path[:-1] if ref.path else ()))
+
+        surfaces = self.introspector.surfaces(wanted) if wanted else {}
+
+        for finding in blocks:
+            ref = finding.reference
+            if self._is_local(ref.module) and self.local is not None:
+                path = self.local.path_for(ref.module)
+                if path is not None:
+                    projected = local_surface(path, module_name=ref.module)
+                    if projected.ok and projected.members:
+                        finding.surface = render(projected, summaries=False, limit=60)
+                continue
+
+            key = (ref.module, ref.path[:-1] if ref.path else ())
+            projected = surfaces.get(key)
+            if projected is not None and projected.ok and projected.members:
+                finding.surface = render(projected, summaries=False, limit=60)
 
     # -- relative imports ------------------------------------------------
 

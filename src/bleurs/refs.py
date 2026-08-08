@@ -120,6 +120,11 @@ class Finding:
     suggestion: str | None = None
     #: Populated only when we abstained.
     abstained: AbstainReason | None = None
+    #: The container's real API surface, attached to blocks. This is what turns
+    #: a rejection into an answer: the agent is told not just that
+    #: `json.loads_safe` is fiction, but what `json` actually offers -- so it
+    #: can correct in one turn instead of guessing again.
+    surface: str | None = None
     #: Which resolver tier produced the answer. Useful for auditing the
     #: zero-false-positive claim: every BLOCK should name the tier that proved it.
     resolver: str = ""

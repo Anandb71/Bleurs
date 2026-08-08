@@ -165,6 +165,8 @@ def render_agent_message(reports: list[Report]) -> str:
     push it toward a different wrong answer.
     """
     lines = ["Bleurs blocked this edit. These references do not exist:"]
+    surfaces: dict[str, str] = {}
+
     for report in reports:
         for finding in sorted(report.blocks, key=_position):
             ref = finding.reference
@@ -174,7 +176,21 @@ def render_agent_message(reports: list[Report]) -> str:
             if finding.suggestion:
                 entry += f"  ({finding.suggestion})"
             lines.append(entry)
-    lines.append("")
+            if finding.surface:
+                surfaces.setdefault(finding.surface.splitlines()[0], finding.surface)
+
+    if surfaces:
+        # The half that makes this a correction rather than a refusal. Telling
+        # the agent it was wrong sends it back to guessing; telling it what is
+        # actually there lets it fix the edit on the next turn without opening
+        # a single file.
+        lines.append("")
+        lines.append("What those containers actually provide:")
+        lines.append("")
+        for text in surfaces.values():
+            lines.append(text)
+            lines.append("")
+
     lines.append(
         "Each was checked against the real environment, not guessed. "
         "Fix the reference or install the dependency, then retry."
