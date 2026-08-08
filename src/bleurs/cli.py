@@ -36,6 +36,12 @@ def main(argv: list[str] | None = None) -> int:
         from .hook import run
 
         return run(sys.argv[2:])
+    if args.command == "mcp":
+        from .mcp import serve
+
+        return serve(Path(args.root).resolve() if args.root else Path.cwd())
+    if args.command == "surface":
+        return _cmd_surface(args)
     if args.command == "demo":
         return _cmd_demo(args)
     if args.command == "install-hook":
@@ -72,6 +78,38 @@ def _cmd_check(args) -> int:
         print(render(reports, explain=args.explain))
 
     return exit_code(reports)
+
+
+def _cmd_surface(args) -> int:
+    """Project an API surface instead of reading the file that implements it."""
+    from .surface import estimate_tokens, installed_surface, local_surface, render
+
+    target = args.target
+    path = Path(target)
+
+    if path.suffix in {".py", ".pyi"} and path.exists():
+        surface = local_surface(path, private=args.all)
+        original = path.read_text(encoding="utf-8", errors="replace")
+    else:
+        surface = installed_surface(target)
+        original = None
+
+    text = render(surface, summaries=not args.no_summaries)
+    print(text)
+
+    if args.stats:
+        paint = Painter()
+        estimated = estimate_tokens(text)
+        line = f"\n~{estimated} tokens"
+        if original:
+            full = estimate_tokens(original)
+            line += (
+                f" vs ~{full} for the whole file "
+                f"{paint.dash} {full / max(estimated, 1):.0f}x smaller"
+            )
+        print(paint(line + "  (estimated at 4 chars/token)", "dim"))
+
+    return 0 if surface.ok else 1
 
 
 def _cmd_demo(args) -> int:
@@ -281,6 +319,28 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="emit a JSON permission decision instead of using exit codes",
     )
+
+    surface = sub.add_parser(
+        "surface",
+        help="project an API surface instead of reading the whole file",
+    )
+    surface.add_argument(
+        "target", help="a dotted module/class (json, datetime.datetime) or a .py path"
+    )
+    surface.add_argument(
+        "--all", action="store_true", help="include private (underscore) names"
+    )
+    surface.add_argument(
+        "--no-summaries", action="store_true", help="names and signatures only"
+    )
+    surface.add_argument(
+        "--stats", action="store_true", help="report the estimated token cost"
+    )
+
+    mcp = sub.add_parser(
+        "mcp", help="run as an MCP server so agents can query the index"
+    )
+    mcp.add_argument("--root", help="project root for local resolution")
 
     demo = sub.add_parser("demo", help="see it catch real hallucinations")
     demo.add_argument("--offline", action="store_true")
