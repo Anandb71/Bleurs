@@ -105,7 +105,9 @@ def _cmd_demo(args) -> int:
         source = path.read_text(encoding="utf-8")
         header = source.splitlines()[0].lstrip("# ").strip()
         print(paint(f"  {path.name}", "cyan"), paint(f"{paint.dash} {header}", "dim"))
-        reports.append(engine.check_source(source, path))
+        # Report against the bare filename. The samples live wherever pip put
+        # them, and a wall of site-packages paths is not the point of the demo.
+        reports.append(engine.check_source(source, Path(path.name)))
 
     print(render(reports, explain=args.explain))
     return 0
