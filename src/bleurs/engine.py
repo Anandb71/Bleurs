@@ -689,11 +689,11 @@ class Engine:
                 f"{ref.dotted} not verified",
             )
 
-        if probe.dynamic:
+        if probe.inconclusive:
             return _abstain(
                 ref,
-                AbstainReason.DYNAMIC_MODULE,
-                f"{module} resolves attributes dynamically",
+                AbstainReason.NOT_INTROSPECTABLE,
+                f"lookup of {ref.dotted} did not complete: {probe.inconclusive}",
             )
         if probe.resolved:
             return _allow(ref, "exists", "introspect")

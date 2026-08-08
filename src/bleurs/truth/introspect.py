@@ -11,11 +11,18 @@ Two consequences, both handled here:
    `sys.exit` on import cannot take the checker with it. `--no-introspect`
    turns the tier off entirely and the engine degrades to abstaining.
 
-2. Python objects can synthesize attributes at lookup time. Any module with a
-   module-level `__getattr__` (PEP 562 -- what every lazy-loading library uses)
-   or any object whose type overrides `__getattr__` is marked dynamic, and the
-   engine must not conclude absence from a `dir()` listing that was never
-   authoritative to begin with.
+2. Python objects can synthesize attributes at lookup time, and for a long
+   while this tier treated that as unknowable: any module with a PEP 562
+   `__getattr__` abstained outright. That was the wrong shape of answer.
+   `__getattr__` is not a fog, it is a *function*, and calling it is how the
+   protocol asks. `typing` defines one for its deprecated aliases and still
+   raises AttributeError for a name it does not have -- which is the module
+   itself saying no, with more authority than any listing we could assemble.
+
+   So the probe asks. AttributeError is a definitive no; anything else means
+   the lookup never completed and is evidence of nothing. `dir()` remains
+   untrustworthy for *enumerating* such a module, which is why `dynamic`
+   survives as metadata for surface listings, but it no longer blocks a verdict.
 """
 
 from __future__ import annotations
@@ -182,6 +189,7 @@ def probe(module, path):
         "container": module,
         "candidates": [],
         "dynamic": False,
+        "inconclusive": None,
     }
     try:
         obj = __import__(module, fromlist=["__name__"])
@@ -199,23 +207,33 @@ def probe(module, path):
     container = obj
     walked = []
     for part in path:
-        if is_dynamic(container):
-            out["dynamic"] = True
-            out["resolved"] = True  # unknowable, so treat as present
-            return out
+        # No pre-emptive bail on __getattr__. A module that defines one is not
+        # unknowable -- it is a function we can call, and it answers. `typing`
+        # has a __getattr__ for deprecated aliases and still raises
+        # AttributeError for a name it does not have. Abstaining there threw
+        # away the authoritative answer and cost more recall than any other
+        # single rule in the project.
         try:
             nxt = getattr(container, part)
-        except BaseException:
-            # A submodule is not an attribute of its package until something
-            # imports it. `from os import path` works; `getattr(os, "path")`
-            # happening to work is luck, not a rule. Try the import before
-            # concluding anything.
+        except AttributeError:
+            # Definitive: either normal lookup failed, or the container's own
+            # __getattr__ declined. Both mean the name is not there.
+            #
+            # A submodule is still not an attribute of its package until
+            # something imports it -- `from os import path` works while
+            # `getattr(os, "path")` succeeding is luck -- so try that first.
             nxt = try_submodule(module, walked, part)
             if nxt is None:
                 out["missing_at"] = part
                 out["container"] = ".".join([module] + walked)
                 out["candidates"] = public_names(container)
+                out["dynamic"] = is_dynamic(container)
                 return out
+        except BaseException as exc:
+            # The lookup never completed -- a lazy import that failed, a
+            # property that raised. Evidence of nothing.
+            out["inconclusive"] = "%s: %s" % (type(exc).__name__, exc)
+            return out
         container = nxt
         walked.append(part)
 
@@ -257,6 +275,7 @@ def main():
                 "container": q.get("module"),
                 "candidates": [],
                 "dynamic": False,
+                "inconclusive": None,
             })
     sys.stdout.write(json.dumps(results))
 
@@ -278,11 +297,25 @@ class Probe:
     dynamic: bool
     error_type: str | None = None
     missing_module: str | None = None
+    #: Set when the attribute lookup raised something other than
+    #: AttributeError, so it neither found nor refuted the name.
+    inconclusive: str | None = None
 
     @property
     def proves_absence(self) -> bool:
-        """Only true when we loaded the container and the name was not in it."""
-        return self.module_ok and not self.resolved and not self.dynamic
+        """True when we opened the container and it refused the name.
+
+        `dynamic` is no longer disqualifying. A container with __getattr__ was
+        *asked*, and raising AttributeError is how the protocol says no; the
+        flag survives only as metadata for surface listings, where dir() can
+        still be incomplete.
+        """
+        return (
+            self.module_ok
+            and not self.resolved
+            and self.missing_at is not None
+            and self.inconclusive is None
+        )
 
     def proves_module_absent(self, module: str) -> bool:
         """Did the import fail *because this module does not exist*?
@@ -459,5 +492,6 @@ class Introspector:
                 dynamic=bool(item.get("dynamic")),
                 error_type=item.get("error_type"),
                 missing_module=item.get("missing_module"),
+                inconclusive=item.get("inconclusive"),
             )
         return out

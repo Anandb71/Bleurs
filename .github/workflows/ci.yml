@@ -28,6 +28,19 @@ jobs:
       - name: Test
         run: pytest -q
 
+      # Every job reports the stdlib surface it can actually see. The union
+      # across three operating systems and four Python versions is the set of
+      # names that exist somewhere, which is the only sound basis for deciding
+      # that a platform-specific name exists nowhere.
+      - name: Dump stdlib surface
+        run: python benchmark/dump_stdlib_surface.py > surface-${{ matrix.os }}-${{ matrix.python }}.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stdlib-surface-${{ matrix.os }}-${{ matrix.python }}
+          path: surface-*.json
+          retention-days: 7
+
       # The suite stubs the network, so this is the only step that proves the
       # registry tier works against the real PyPI. Allowed to fail: a CI runner
       # with no egress must not turn into a red build on a correct commit.
