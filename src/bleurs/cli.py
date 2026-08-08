@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .analyze import SUPPORTED_EXTENSIONS
 from .engine import Config, Engine
 from .refs import Report
 from .report import Painter, exit_code, render
@@ -57,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
 def _cmd_check(args) -> int:
     paths = _expand(args.paths, args.exclude or [])
     if not paths:
-        print("no Python files found", file=sys.stderr)
+        print("no supported source files found", file=sys.stderr)
         return 0
 
     root = Path(args.root).resolve() if args.root else _infer_root(paths[0])
@@ -115,7 +116,9 @@ def _cmd_surface(args) -> int:
 def _cmd_demo(args) -> int:
     """Run the bundled samples. This is the thirty-second version of the pitch."""
     samples = Path(__file__).parent / "demo"
-    files = sorted(samples.glob("*.py"))
+    files = sorted(
+        f for f in samples.iterdir() if f.suffix.lower() in SUPPORTED_EXTENSIONS
+    )
     if not files:
         print("demo samples missing from this install", file=sys.stderr)
         return 1
@@ -141,7 +144,7 @@ def _cmd_demo(args) -> int:
     reports: list[Report] = []
     for path in files:
         source = path.read_text(encoding="utf-8")
-        header = source.splitlines()[0].lstrip("# ").strip()
+        header = source.splitlines()[0].lstrip("#/ ").strip()
         print(paint(f"  {path.name}", "cyan"), paint(f"{paint.dash} {header}", "dim"))
         # Report against the bare filename. The samples live wherever pip put
         # them, and a wall of site-packages paths is not the point of the demo.
@@ -224,13 +227,15 @@ def _expand(paths: list[str], exclude: list[str]) -> list[Path]:
     for raw in paths:
         path = Path(raw)
         if path.is_dir():
-            for child in sorted(path.rglob("*.py")):
+            for child in sorted(path.rglob("*")):
+                if child.suffix.lower() not in SUPPORTED_EXTENSIONS:
+                    continue
                 if any(part in _SKIP_DIRS for part in child.parts):
                     continue
                 if _excluded(child, exclude):
                     continue
                 out.append(child)
-        elif path.suffix in {".py", ".pyi"}:
+        elif path.suffix.lower() in SUPPORTED_EXTENSIONS:
             out.append(path)
     return out
 

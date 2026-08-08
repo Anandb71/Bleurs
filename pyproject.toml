@@ -12,6 +12,7 @@ keywords = [
     "static-analysis",
     "ai-agents",
     "claude-code",
+    "typescript",
     "slopsquatting",
     "supply-chain",
 ]
@@ -32,7 +33,11 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
+# TypeScript and JavaScript support. Kept optional so the core install stays
+# dependency-free -- a Python-only user should never pay for grammars they
+# will not load.
+typescript = ["tree-sitter>=0.23", "tree-sitter-typescript>=0.23"]
+dev = ["pytest>=7.0", "tree-sitter>=0.23", "tree-sitter-typescript>=0.23"]
 
 [project.urls]
 Homepage = "https://github.com/Anandb71/Bleurs"

@@ -19,6 +19,7 @@ import json
 import sys
 from pathlib import Path
 
+from .analyze import SUPPORTED_EXTENSIONS
 from .engine import Config, Engine
 from .refs import Report
 from .report import render_agent_message
@@ -52,7 +53,7 @@ def run(argv: list[str] | None = None) -> int:
         return ALLOW
     path, content = resolved
 
-    if path.suffix.lower() not in {".py", ".pyi"}:
+    if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
         return ALLOW
 
     try:
@@ -140,7 +141,7 @@ def _read(path: Path) -> str | None:
 
 def _infer_root(path: Path) -> Path | None:
     """Walk up for a project marker so local modules resolve."""
-    markers = ("pyproject.toml", "setup.py", "setup.cfg", ".git")
+    markers = ("pyproject.toml", "setup.py", "setup.cfg", "package.json", ".git")
     for parent in [path.parent, *path.parents]:
         if any((parent / m).exists() for m in markers):
             return parent
