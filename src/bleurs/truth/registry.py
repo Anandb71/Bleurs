@@ -31,29 +31,46 @@ _TTL_PRESENT = 30 * 24 * 3600
 _TTL_ABSENT = 7 * 24 * 3600
 
 
-def cache_path() -> Path:
+def cache_path(name: str = "registry.json") -> Path:
     base = os.environ.get("BLEURS_CACHE_DIR")
     if base:
-        return Path(base) / "registry.json"
+        return Path(base) / name
     if os.name == "nt":
         root = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-        return root / "bleurs" / "registry.json"
+        return root / "bleurs" / name
     root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-    return root / "bleurs" / "registry.json"
+    return root / "bleurs" / name
 
 
-class Registry:
-    """PyPI name existence, cached on disk."""
+class ExistenceCache:
+    """Does a name exist in some package registry? Cached on disk.
+
+    Shared by PyPI and npm because the question, the caching policy and the
+    consequences of getting it wrong are identical in both ecosystems. Only
+    the URL and the name normalization differ.
+    """
+
+    cache_file = "registry.json"
+    url_template = ""
+    accept = "*/*"
 
     def __init__(self, *, enabled: bool = True, timeout: float = 4.0) -> None:
         self.enabled = enabled
         self.timeout = timeout
-        self._path = cache_path()
+        self._path = cache_path(self.cache_file)
         self._cache: dict[str, dict] = self._load()
         self._dirty = False
         #: Set when any lookup failed for network reasons, so the engine can
         #: report "unverified" honestly instead of silently allowing.
         self.network_failed = False
+
+    # -- subclass hooks --------------------------------------------------
+
+    def normalize(self, name: str) -> str:
+        return name
+
+    def url(self, normalized: str) -> str:
+        return self.url_template.format(name=normalized)
 
     # -- public ----------------------------------------------------------
 
@@ -62,7 +79,7 @@ class Registry:
         if not self.enabled:
             return None
 
-        key = normalize_project_name(project)
+        key = self.normalize(project)
         if not key:
             return None
 
@@ -98,12 +115,9 @@ class Registry:
 
     def _fetch(self, normalized: str) -> bool | None:
         request = urllib.request.Request(
-            _SIMPLE_INDEX.format(name=normalized),
+            self.url(normalized),
             method="HEAD",
-            headers={
-                "User-Agent": _USER_AGENT,
-                "Accept": "application/vnd.pypi.simple.v1+json",
-            },
+            headers={"User-Agent": _USER_AGENT, "Accept": self.accept},
         )
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
@@ -121,3 +135,34 @@ class Registry:
         except (OSError, json.JSONDecodeError):
             return {}
         return raw if isinstance(raw, dict) else {}
+
+
+class Registry(ExistenceCache):
+    """PyPI name existence."""
+
+    cache_file = "registry.json"
+    url_template = _SIMPLE_INDEX
+    accept = "application/vnd.pypi.simple.v1+json"
+
+    def normalize(self, name: str) -> str:
+        return normalize_project_name(name)
+
+
+class NpmRegistry(ExistenceCache):
+    """npm name existence.
+
+    npm has the harder version of this problem. Its namespace is flat, vastly
+    larger, and has no PEP 503 normalization, so a hallucinated name is both
+    more likely and cheaper for an attacker to claim. Package names are already
+    lowercase by rule, so normalization is a no-op beyond trimming.
+    """
+
+    cache_file = "npm.json"
+    url_template = "https://registry.npmjs.org/{name}"
+    accept = "application/json"
+
+    def normalize(self, name: str) -> str:
+        name = name.strip().strip("/")
+        # Scoped names carry a slash the registry accepts unencoded, but a
+        # leading or doubled slash would silently query the wrong path.
+        return name if "//" not in name else ""

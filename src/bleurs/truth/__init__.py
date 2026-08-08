@@ -22,7 +22,8 @@ from .env import (
 )
 from .introspect import Introspector, Probe
 from .local import LocalIndex
-from .registry import Registry
+from .node import NodeProject, Resolution, is_builtin, package_root
+from .registry import NpmRegistry, Registry
 
 __all__ = [
     "IMPORT_TO_DISTRIBUTION",
@@ -30,12 +31,17 @@ __all__ = [
     "LocalIndex",
     "Probe",
     "PLATFORM_VARYING_STDLIB",
+    "NodeProject",
+    "NpmRegistry",
     "Registry",
+    "Resolution",
     "install_name",
     "installed_top_levels",
+    "is_builtin",
     "is_stdlib",
     "known_import_name",
     "normalize_project_name",
+    "package_root",
     "platform_varying",
     "stdlib_modules",
     "top_level_module_exists",
